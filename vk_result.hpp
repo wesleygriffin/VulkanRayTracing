@@ -1,26 +1,10 @@
 #ifndef VK_HPP_
 #define VK_HPP_
 
-#define VK_VERSION_1_0
-// clang-format off
-#include "flextVk.h"
-#include "GLFW/glfw3.h"
-// clang-format on
-
+#include <vulkan/vulkan.h>
 #include <system_error>
 
 namespace vk {
-
-template <class T>
-void NameObject(VkDevice device, VkObjectType objectType, T objectHandle,
-                char const* objectName) noexcept {
-#if 0 // broken in 1.1.101.0 SDK with validation layers enabled
-  VkDebugUtilsObjectNameInfoEXT objectNameInfo = {
-    VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT, nullptr, objectType,
-    reinterpret_cast<std::uint64_t>(objectHandle), objectName};
-  vkSetDebugUtilsObjectNameEXT(device, &objectNameInfo);
-#endif
-} // NameObject
 
 enum class VulkanResult {
   kSuccess = VK_SUCCESS,

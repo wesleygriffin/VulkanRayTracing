@@ -1,35 +1,73 @@
+// clang-format off
+#include "flextVk.h"
+#define VK_VERSION_1_0
+#include "GLFW/glfw3.h"
+// clang-format on
+
 #include "expected.hpp"
 #include "gsl/gsl-lite.hpp"
-#include "vk.hpp"
+#include "vk_result.hpp"
 #include <array>
 #include <cstdio>
 #include <system_error>
 #include <vector>
 
-constexpr uint32_t const sWindowWidth = 800;
-constexpr uint32_t const sWindowHeight = 600;
+#ifdef NDEBUG
 
-VkPhysicalDeviceFeatures2 sDeviceFeatures = {};
+#define LOG_ENTER() do {} while(false)
+#define LOG_LEAVE() do {} while(false)
 
-std::array<gsl::czstring, 4> sDeviceExtensions = {
+#else
+
+#define LOG_ENTER()                                                            \
+  do {                                                                         \
+    std::fprintf(stderr, "ENTER: %s (%s:%d)\n", __func__, __FILE__, __LINE__); \
+  } while (false)
+
+#define LOG_LEAVE()                                                            \
+  do {                                                                         \
+    std::fprintf(stderr, "LEAVE: %s (%s:%d)\n", __func__, __FILE__, __LINE__); \
+  } while (false)
+
+#endif
+
+static constexpr std::uint32_t const sWindowWidth = 800;
+static constexpr std::uint32_t const sWindowHeight = 600;
+
+static VkPhysicalDeviceFeatures2 sDeviceFeatures = {};
+
+static std::array<gsl::czstring, 4> sDeviceExtensions = {
   VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
   VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
   VK_KHR_MAINTENANCE2_EXTENSION_NAME,
   VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
 
-GLFWwindow* sWindow = nullptr;
-bool sFramebufferResized = false;
+static GLFWwindow* sWindow = nullptr;
+static bool sFramebufferResized = false;
 
-VkInstance sInstance = VK_NULL_HANDLE;
-VkDebugUtilsMessengerEXT sDebugUtilsMessenger = VK_NULL_HANDLE;
-VkPhysicalDevice sPhysicalDevice = VK_NULL_HANDLE;
+static VkInstance sInstance = VK_NULL_HANDLE;
+static VkDebugUtilsMessengerEXT sDebugUtilsMessenger = VK_NULL_HANDLE;
+static VkPhysicalDevice sPhysicalDevice = VK_NULL_HANDLE;
 
-uint32_t sQueueFamilyIndex = UINT32_MAX;
-VkDevice sDevice = VK_NULL_HANDLE;
-VkSurfaceKHR sSurface = VK_NULL_HANDLE;
+static std::uint32_t sQueueFamilyIndex = UINT32_MAX;
+static VkDevice sDevice = VK_NULL_HANDLE;
+
+static VkSurfaceKHR sSurface = VK_NULL_HANDLE;
+static VkSwapchainKHR sSwapchain = VK_NULL_HANDLE;
 
 static void Draw() noexcept {} // Draw
+
+template <class T>
+void NameObject(VkDevice device, VkObjectType objectType, T objectHandle,
+                gsl::czstring objectName) noexcept {
+#if 0 // broken in 1.1.101.0 SDK with validation layers enabled
+  VkDebugUtilsObjectNameInfoEXT objectNameInfo = {
+    VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT, nullptr, objectType,
+    reinterpret_cast<std::uint64_t>(objectHandle), objectName};
+  vkSetDebugUtilsObjectNameEXT(device, &objectNameInfo);
+#endif
+} // NameObject
 
 static void FramebufferResized(GLFWwindow*, int, int) noexcept {
   sFramebufferResized = true;
@@ -44,6 +82,8 @@ static void ErrorCallback(int error, gsl::czstring message) {
 }
 
 static tl::expected<void, std::system_error> InitWindow() noexcept {
+  LOG_ENTER();
+
   glfwInit();
   glfwSetErrorCallback(ErrorCallback);
 
@@ -60,13 +100,16 @@ static tl::expected<void, std::system_error> InitWindow() noexcept {
   glfwSetFramebufferSizeCallback(sWindow, FramebufferResized);
 
   Ensures(sWindow != nullptr);
+
+  LOG_LEAVE();
   return {};
 } // InitWindow
 
 static tl::expected<void, std::system_error> InitVulkan() noexcept {
+  LOG_ENTER();
   flextVkInit();
 
-  uint32_t count;
+  std::uint32_t count;
   gsl::czstring* exts = glfwGetRequiredInstanceExtensions(&count);
   std::vector<gsl::czstring> extensions(exts, exts + count);
 
@@ -83,20 +126,24 @@ static tl::expected<void, std::system_error> InitVulkan() noexcept {
   VkInstanceCreateInfo instanceCI = {};
   instanceCI.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
   instanceCI.pApplicationInfo = &appInfo;
-  instanceCI.enabledLayerCount = gsl::narrow_cast<uint32_t>(std::size(layers));
+  instanceCI.enabledLayerCount =
+    gsl::narrow_cast<std::uint32_t>(std::size(layers));
   instanceCI.ppEnabledLayerNames = layers.data();
   instanceCI.enabledExtensionCount =
-    gsl::narrow_cast<uint32_t>(std::size(extensions));
+    gsl::narrow_cast<std::uint32_t>(std::size(extensions));
   instanceCI.ppEnabledExtensionNames = extensions.data();
 
   if (auto result = vkCreateInstance(&instanceCI, nullptr, &sInstance);
       result != VK_SUCCESS) {
+    LOG_LEAVE();
     return tl::unexpected(
       std::system_error(vk::make_error_code(result), "vkCreateInstance"));
   }
 
   flextVkInitInstance(sInstance);
   Ensures(sInstance != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
   return {};
 } // InitVulkan
 
@@ -106,38 +153,39 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL DebugUtilsMessengerCallback(
   VkDebugUtilsMessengerCallbackDataEXT const* pCallbackData, void*) noexcept {
 
   if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-    fprintf(stderr, "ERROR  : %s", pCallbackData->pMessage);
+    std::fprintf(stderr, "ERROR  : %s", pCallbackData->pMessage);
   } else if (messageSeverity >=
              VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-    fprintf(stderr, "WARNING: %s", pCallbackData->pMessage);
+    std::fprintf(stderr, "WARNING: %s", pCallbackData->pMessage);
   } else if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
-    fprintf(stderr, "   INFO: %s", pCallbackData->pMessage);
+    std::fprintf(stderr, "   INFO: %s", pCallbackData->pMessage);
   } else if (messageSeverity >=
              VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
-    fprintf(stderr, "VERBOSE: %s", pCallbackData->pMessage);
+    std::fprintf(stderr, "VERBOSE: %s", pCallbackData->pMessage);
   }
 
   if (pCallbackData->objectCount > 0) {
-    fprintf(stderr, " Objects:");
-    for (uint32_t i = 0; i < pCallbackData->objectCount - 1; ++i) {
+    std::fprintf(stderr, " Objects:");
+    for (std::uint32_t i = 0; i < pCallbackData->objectCount - 1; ++i) {
       auto&& pObject = pCallbackData->pObjects[i];
-      fprintf(stderr, " %s (%llx),",
-              pObject.pObjectName ? pObject.pObjectName : "<unnamed>",
-              pObject.objectHandle);
+      std::fprintf(stderr, " %s (%llx),",
+                   pObject.pObjectName ? pObject.pObjectName : "<unnamed>",
+                   pObject.objectHandle);
     }
 
     auto&& pObject = pCallbackData->pObjects[pCallbackData->objectCount - 1];
-    fprintf(stderr, " %s (%llx)",
-            pObject.pObjectName ? pObject.pObjectName : "<unnamed>",
-            pObject.objectHandle);
+    std::fprintf(stderr, " %s (%llx)",
+                 pObject.pObjectName ? pObject.pObjectName : "<unnamed>",
+                 pObject.objectHandle);
   }
 
-  fprintf(stderr, "\n");
+  std::fprintf(stderr, "\n");
   return VK_FALSE;
 } // DebugUtilsMessengerCallback
 
 static tl::expected<void, std::system_error>
 CreateDebugUtilsMessenger() noexcept {
+  LOG_ENTER();
   Expects(sInstance != VK_NULL_HANDLE);
 
   VkDebugUtilsMessengerCreateInfoEXT debugUtilsMessengerCI = {};
@@ -157,19 +205,22 @@ CreateDebugUtilsMessenger() noexcept {
   if (auto result = vkCreateDebugUtilsMessengerEXT(
         sInstance, &debugUtilsMessengerCI, nullptr, &sDebugUtilsMessenger);
       result != VK_SUCCESS) {
+    LOG_LEAVE();
     return tl::unexpected(std::system_error(vk::make_error_code(result),
                                             "vkCreateDebugUtilsMessengerEXT"));
   }
 
+  LOG_LEAVE();
   return {};
 } // CreateDebugUtilsMessenger
 
-static [[nodiscard]] uint32_t
+static [[nodiscard]] std::uint32_t
 GetQueueFamilyIndex(VkPhysicalDevice device, VkQueueFlags queueFlags) noexcept {
+  LOG_ENTER();
   Expects(device != VK_NULL_HANDLE);
 
   // Get the number of physical device queue family properties
-  uint32_t count;
+  std::uint32_t count;
   vkGetPhysicalDeviceQueueFamilyProperties2(device, &count, nullptr);
 
   // Get the physical device queue family properties
@@ -181,12 +232,17 @@ GetQueueFamilyIndex(VkPhysicalDevice device, VkQueueFlags queueFlags) noexcept {
 
   vkGetPhysicalDeviceQueueFamilyProperties2(device, &count, properties.data());
 
-  for (uint32_t i = 0; i < count; ++i) {
+  for (std::uint32_t i = 0; i < count; ++i) {
     VkQueueFamilyProperties props = properties[i].queueFamilyProperties;
     if (props.queueCount == 0) continue;
-    if (props.queueFlags & queueFlags) return i;
+
+    if (props.queueFlags & queueFlags) {
+      LOG_LEAVE();
+      return i;
+    }
   }
 
+  LOG_LEAVE();
   return UINT32_MAX;
 } // GetQueueFamilyIndex
 
@@ -284,6 +340,7 @@ ComparePhysicalDeviceFeatures(VkPhysicalDeviceFeatures2 a,
 static [[nodiscard]] tl::expected<bool, std::system_error> IsPhysicalDeviceGood(
   VkPhysicalDevice device, VkPhysicalDeviceFeatures2 features,
   gsl::span<gsl::czstring> extensions, VkQueueFlags queueFlags) noexcept {
+  LOG_ENTER();
   Expects(device != VK_NULL_HANDLE);
 
   //
@@ -315,10 +372,11 @@ static [[nodiscard]] tl::expected<bool, std::system_error> IsPhysicalDeviceGood(
   //
 
   // Get the number of physical device extension properties.
-  uint32_t count;
+  std::uint32_t count;
   if (auto result =
         vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr);
       result != VK_SUCCESS) {
+    LOG_LEAVE();
     return tl::unexpected(std::system_error(
       vk::make_error_code(result), "vkEnumerateDeviceExtensionProperties"));
   }
@@ -328,11 +386,12 @@ static [[nodiscard]] tl::expected<bool, std::system_error> IsPhysicalDeviceGood(
   if (auto result = vkEnumerateDeviceExtensionProperties(
         device, nullptr, &count, properties.data());
       result != VK_SUCCESS) {
+    LOG_LEAVE();
     return tl::unexpected(std::system_error(
       vk::make_error_code(result), "vkEnumerateDeviceExtensionProperties"));
   }
 
-  uint32_t queueFamilyIndex = GetQueueFamilyIndex(device, queueFlags);
+  std::uint32_t queueFamilyIndex = GetQueueFamilyIndex(device, queueFlags);
 
   //
   // Check all queried data to see if this device is good.
@@ -354,16 +413,24 @@ static [[nodiscard]] tl::expected<bool, std::system_error> IsPhysicalDeviceGood(
       }
     }
 
-    if (!found) return false;
+    if (!found) {
+      LOG_LEAVE();
+      return false;
+    }
   }
 
   // Check for the queue
-  if (queueFamilyIndex == UINT32_MAX) return false;
+  if (queueFamilyIndex == UINT32_MAX) {
+    LOG_LEAVE();
+    return false;
+  }
 
+  LOG_LEAVE();
   return true;
 } // IsPhysicalDeviceGood
 
 static tl::expected<void, std::system_error> ChoosePhysicalDevice() noexcept {
+  LOG_ENTER();
   Expects(sInstance != VK_NULL_HANDLE);
 
   sDeviceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -386,9 +453,10 @@ static tl::expected<void, std::system_error> ChoosePhysicalDevice() noexcept {
   sDeviceFeatures.features.shaderFloat64 = VK_TRUE;
   sDeviceFeatures.features.shaderInt64 = VK_TRUE;
 
-  uint32_t count;
+  std::uint32_t count;
   if (auto result = vkEnumeratePhysicalDevices(sInstance, &count, nullptr);
       result != VK_SUCCESS) {
+    LOG_LEAVE();
     return tl::unexpected(std::system_error(vk::make_error_code(result),
                                             "vkEnumeratePhysicalDevices"));
   }
@@ -397,6 +465,7 @@ static tl::expected<void, std::system_error> ChoosePhysicalDevice() noexcept {
   if (auto result =
         vkEnumeratePhysicalDevices(sInstance, &count, devices.data());
       result != VK_SUCCESS) {
+    LOG_LEAVE();
     return tl::unexpected(std::system_error(vk::make_error_code(result),
                                             "vkEnumeratePhysicalDevices"));
   }
@@ -415,10 +484,13 @@ static tl::expected<void, std::system_error> ChoosePhysicalDevice() noexcept {
 
   Ensures(sPhysicalDevice != VK_NULL_HANDLE);
   Ensures(sQueueFamilyIndex != UINT32_MAX);
+
+  LOG_LEAVE();
   return {};
 } // ChoosePhysicalDevice
 
 static tl::expected<void, std::system_error> CreateDevice() noexcept {
+  LOG_ENTER();
   Expects(sInstance != VK_NULL_HANDLE);
   Expects(sPhysicalDevice != VK_NULL_HANDLE);
   Expects(sQueueFamilyIndex != UINT32_MAX);
@@ -437,30 +509,34 @@ static tl::expected<void, std::system_error> CreateDevice() noexcept {
   deviceCI.queueCreateInfoCount = 1;
   deviceCI.pQueueCreateInfos = &deviceQueueCI;
   deviceCI.enabledExtensionCount =
-    gsl::narrow_cast<uint32_t>(std::size(sDeviceExtensions));
+    gsl::narrow_cast<std::uint32_t>(std::size(sDeviceExtensions));
   deviceCI.ppEnabledExtensionNames = sDeviceExtensions.data();
 
   if (auto result =
         vkCreateDevice(sPhysicalDevice, &deviceCI, nullptr, &sDevice);
       result != VK_SUCCESS) {
+    LOG_LEAVE();
     return tl::unexpected(
       std::system_error(vk::make_error_code(result), "vkCreateDevice"));
   }
 
-  vk::NameObject(sDevice, VK_OBJECT_TYPE_INSTANCE, sInstance, "sInstance");
+  NameObject(sDevice, VK_OBJECT_TYPE_INSTANCE, sInstance, "sInstance");
   if (sDebugUtilsMessenger != VK_NULL_HANDLE) {
-    vk::NameObject(sDevice, VK_OBJECT_TYPE_DEBUG_UTILS_MESSENGER_EXT,
-                   sDebugUtilsMessenger, "sDebugUtilsMessenger");
+    NameObject(sDevice, VK_OBJECT_TYPE_DEBUG_UTILS_MESSENGER_EXT,
+               sDebugUtilsMessenger, "sDebugUtilsMessenger");
   }
-  vk::NameObject(sDevice, VK_OBJECT_TYPE_PHYSICAL_DEVICE, sPhysicalDevice,
-                 "sPhysicalDevice");
-  vk::NameObject(sDevice, VK_OBJECT_TYPE_DEVICE, sDevice, "sDevice");
+  NameObject(sDevice, VK_OBJECT_TYPE_PHYSICAL_DEVICE, sPhysicalDevice,
+             "sPhysicalDevice");
+  NameObject(sDevice, VK_OBJECT_TYPE_DEVICE, sDevice, "sDevice");
 
   Ensures(sDevice != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
   return {};
 } // CreateDevice
 
 static tl::expected<void, std::system_error> CreateSurface() noexcept {
+  LOG_ENTER();
   Expects(sWindow != nullptr);
   Expects(sInstance != VK_NULL_HANDLE);
   Expects(sPhysicalDevice != VK_NULL_HANDLE);
@@ -468,13 +544,27 @@ static tl::expected<void, std::system_error> CreateSurface() noexcept {
   if (auto result =
         glfwCreateWindowSurface(sInstance, sWindow, nullptr, &sSurface);
       result != VK_SUCCESS) {
+    LOG_LEAVE();
     return tl::unexpected(std::system_error(vk::make_error_code(result),
                                             "glfwCreateWindowSurface"));
   }
 
   Ensures(sSurface != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
   return {};
-}
+} // CreateSurface
+
+static tl::expected<void, std::system_error> CreateSwapchain() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sSurface != VK_NULL_HANDLE);
+
+  Ensures(sSwapchain != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
+  return {};
+} // CreateSwapchain
 
 int main() {
   // clang-format off
@@ -484,11 +574,12 @@ int main() {
     .and_then(ChoosePhysicalDevice)
     .and_then(CreateDevice)
     .and_then(CreateSurface)
+    .and_then(CreateSwapchain)
     ;
   // clang-format on
 
   if (!res) {
-    std::fprintf(stderr, "Init: %s\n", res.error().what());
+    std::fprintf(stderr, "%s\n", res.error().what());
     std::exit(EXIT_FAILURE);
   }
 
