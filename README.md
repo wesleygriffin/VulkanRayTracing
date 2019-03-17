@@ -7,11 +7,17 @@ Examples for using the real-time raytracing extensions in Vulkan
 The following requirements must be met for these examples to compile.
 - CMake 3.12 or higher
 - Vulkan SDK 1.1.101 or higher
+- Python 3.4 or higher
+  - Wheezy Template: `pip install --user wheezy.template`
 
 ### Dependencies
 The following packages are fetched and managed as part of the build.
-- [glfw/glfw](https://github.com/glfw/glfw)
 - [g-truc/glm](https://github.com/g-truc/glm)
+- [glfw/glfw](https://github.com/glfw/glfw)
+- [GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator)
+- [martinmoene/gsl-lite](https://github.com/martinmoene/gsl-lite)
+- [mosra/flextgl](https://github.com/mosra/flextgl)
+- [TartanLlama/expected](https://github.com/TartanLlama/expected)
 
 ## Other
 
