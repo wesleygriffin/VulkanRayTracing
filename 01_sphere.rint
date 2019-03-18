@@ -3,9 +3,13 @@
 
 hitAttributeNV vec3 normalVector;
 
+layout(shaderRecordNV) buffer Sphere {
+  vec4 centerRadius;
+} sphere;
+
 void main() {
-  vec3 center = vec3(0.f, 0.f, -1.f);
-  float radius = .5f;
+  const vec3 center = sphere.centerRadius.xyz;
+  const float radius = sphere.centerRadius.w;
 
   vec3 oc = gl_WorldRayOriginNV - center;
   float a = dot(gl_WorldRayDirectionNV, gl_WorldRayDirectionNV);

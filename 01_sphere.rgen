@@ -11,6 +11,10 @@ layout(set = 0, binding = 2) uniform Camera {
   vec4 origin;
 } camera;
 
+layout(shaderRecordNV) buffer Sphere {
+  vec4 centerRadius;
+} sphere;
+
 layout(location = 0) rayPayloadNV vec3 hitValue;
 
 void main() {
@@ -24,8 +28,8 @@ void main() {
   float tmin = .001f;
   float tmax = 10000.f;
 
-  traceNV(topLevelAS, rayFlags, cullMask, 0 /*sbtRecordOffset*/,
-    0 /*sbtRecordStride*/, 0 /*missIndex*/, camera.origin.xyz, tmin, direction,
-    tmax, 0 /*payload*/);
+  traceNV(topLevelAS, rayFlags, cullMask, 0 /* sbtRecordOffset */,
+    16 /* sbtRecordStride == sizeof(Sphere) (in bytes) */, 0 /* missIndex */,
+    camera.origin.xyz, tmin, direction, tmax, 0 /* payload */);
   imageStore(image, ivec2(gl_LaunchIDNV.xy), vec4(hitValue, 1.f));
 }

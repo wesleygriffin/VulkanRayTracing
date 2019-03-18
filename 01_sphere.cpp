@@ -62,6 +62,40 @@ using PFN_vkCmdCopyBuffer = decltype(vkCmdCopyBuffer);
 static constexpr std::uint32_t const kWindowWidth = 1000;
 static constexpr std::uint32_t const kWindowHeight = 1000;
 
+struct AABB {
+  alignas(4) glm::vec3 min;
+  alignas(4) glm::vec3 max;
+
+  AABB(glm::vec3 p, glm::vec3 q)
+  noexcept
+    : min(std::move(p))
+    , max(std::move(q)) {}
+}; // struct AABB
+
+struct Sphere {
+  alignas(16) glm::vec4 centerRadius;
+
+  Sphere(glm::vec3 c, float r) noexcept
+    : centerRadius(std::move(c), r) {}
+
+  AABB aabb() const noexcept {
+    return AABB(glm::vec3(centerRadius.x, centerRadius.y, centerRadius.z) -
+                  centerRadius.w,
+                glm::vec3(centerRadius.x, centerRadius.y, centerRadius.z) +
+                  centerRadius.w);
+  }
+}; // struct Spheres
+
+std::array<Sphere, 2> sSpheres = {
+  Sphere(glm::vec3(0.f, 0.f, -1.f), .5f),
+  Sphere(glm::vec3(0.f, -100.f, -1.f), 100.f),
+};
+
+std::array<AABB, 2> sAABBs = {
+  sSpheres[0].aabb(),
+  sSpheres[1].aabb(),
+};
+
 static VkPhysicalDeviceFeatures2 sDeviceFeatures = {};
 
 static std::array<gsl::czstring, 5> sDeviceExtensions = {
@@ -1538,7 +1572,7 @@ CreateBottomLevelAccelerationStructures() noexcept {
 
   VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bufferCI.size = 24; // 6 32 bit floats == 6 x 4 bytes == 24 bytes
+  bufferCI.size = sizeof(AABB) * sAABBs.size();
   bufferCI.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 
   VmaAllocationCreateInfo allocationCI = {};
@@ -1553,17 +1587,15 @@ CreateBottomLevelAccelerationStructures() noexcept {
       std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
   }
 
-  float* aabbData;
-  if (auto ptr = MapMemory<float*>(sAllocator, aabbBufferAllocation)) {
+  AABB* aabbData;
+  if (auto ptr = MapMemory<AABB*>(sAllocator, aabbBufferAllocation)) {
     aabbData = *ptr;
   } else {
     LOG_LEAVE();
     return tl::unexpected(ptr.error());
   }
 
-  aabbData[0] = aabbData[1] = aabbData[2] = -1.f; // min
-  aabbData[3] = aabbData[4] = aabbData[5] = 1.f;  // max
-
+  std::memcpy(aabbData, sAABBs.data(), sizeof(AABB) * sAABBs.size());
   vmaUnmapMemory(sAllocator, aabbBufferAllocation);
 
   VkGeometryNV geometry = {};
@@ -1577,8 +1609,9 @@ CreateBottomLevelAccelerationStructures() noexcept {
 
   geometry.geometry.aabbs.sType = VK_STRUCTURE_TYPE_GEOMETRY_AABB_NV;
   geometry.geometry.aabbs.aabbData = aabbBuffer;
-  geometry.geometry.aabbs.numAABBs = 1;
-  geometry.geometry.aabbs.stride = 24;
+  geometry.geometry.aabbs.numAABBs =
+    gsl::narrow_cast<std::uint32_t>(sAABBs.size());
+  geometry.geometry.aabbs.stride = sizeof(AABB);
   geometry.geometry.aabbs.offset = 0;
 
   VkAccelerationStructureCreateInfoNV accelerationStructureCI = {};
@@ -1755,7 +1788,7 @@ static tl::expected<void, std::system_error> BuildAccelerationStructures() noexc
 
   VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bufferCI.size = 24; // 6 32 bit floats == 6 x 4 bytes == 24 bytes
+  bufferCI.size = sizeof(AABB) * sAABBs.size();
   bufferCI.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 
   VmaAllocationCreateInfo allocationCI = {};
@@ -1770,17 +1803,15 @@ static tl::expected<void, std::system_error> BuildAccelerationStructures() noexc
       std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
   }
 
-  float* aabbData;
-  if (auto ptr = MapMemory<float*>(sAllocator, aabbBufferAllocation)) {
+  AABB* aabbData;
+  if (auto ptr = MapMemory<AABB*>(sAllocator, aabbBufferAllocation)) {
     aabbData = *ptr;
   } else {
     LOG_LEAVE();
     return tl::unexpected(ptr.error());
   }
 
-  aabbData[0] = aabbData[1] = aabbData[2] = -1.f; // min
-  aabbData[3] = aabbData[4] = aabbData[5] = 1.f;  // max
-
+  std::memcpy(aabbData, sAABBs.data(), sizeof(AABB) * sAABBs.size());
   vmaUnmapMemory(sAllocator, aabbBufferAllocation);
 
   VkGeometryNV geometry = {};
@@ -1794,8 +1825,9 @@ static tl::expected<void, std::system_error> BuildAccelerationStructures() noexc
 
   geometry.geometry.aabbs.sType = VK_STRUCTURE_TYPE_GEOMETRY_AABB_NV;
   geometry.geometry.aabbs.aabbData = aabbBuffer;
-  geometry.geometry.aabbs.numAABBs = 1;
-  geometry.geometry.aabbs.stride = 24;
+  geometry.geometry.aabbs.numAABBs =
+    gsl::narrow_cast<std::uint32_t>(sAABBs.size());
+  geometry.geometry.aabbs.stride = sizeof(AABB);
   geometry.geometry.aabbs.offset = 0;
 
   VkAccelerationStructureInfoNV bottomLevelASInfo = {};
@@ -1965,9 +1997,12 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
       vk::make_error_code(result), "vkGetRayTracingShaderGroupHandlesNV"));
   }
 
+  std::uint32_t hitRecordStride = sizeof(Sphere) + sShaderGroupHandleSize;
+
   VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bufferCI.size = sShaderGroupHandleSize * 3;
+  bufferCI.size = gsl::narrow_cast<std::uint32_t>(
+    sShaderGroupHandleSize * 2 + hitRecordStride * sSpheres.size());
   bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
   VmaAllocationCreateInfo allocationCI = {};
@@ -1985,23 +2020,41 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
       std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
   }
 
-  void* stagingData;
-  if (auto ptr = MapMemory<void*>(sAllocator, stagingAllocation)) {
+  std::byte* stagingData;
+  if (auto ptr = MapMemory<std::byte*>(sAllocator, stagingAllocation)) {
     stagingData = *ptr;
   } else {
     LOG_LEAVE();
     return tl::unexpected(ptr.error());
   }
 
-  std::memcpy(stagingData, shaderGroupHandles.data(),
-              shaderGroupHandles.size());
+  std::size_t offset = 0;
+
+  // raygen
+  std::memcpy(stagingData + offset, shaderGroupHandles.data() + offset,
+              sShaderGroupHandleSize);
+  offset += sShaderGroupHandleSize;
+
+  // miss
+  std::memcpy(stagingData + offset, shaderGroupHandles.data() + offset,
+              sShaderGroupHandleSize);
+  offset += sShaderGroupHandleSize;
+
+  // hit groups
+  for (auto&& sphere : sSpheres) {
+    std::memcpy(stagingData + offset,
+                shaderGroupHandles.data() + (sShaderGroupHandleSize * 2),
+                sShaderGroupHandleSize);
+    offset += sShaderGroupHandleSize;
+
+    std::memcpy(stagingData + offset, &sSpheres[0], sizeof(Sphere));
+    offset += sizeof(Sphere);
+  }
+
   vmaUnmapMemory(sAllocator, stagingAllocation);
 
   char objectName[] = "sShaderBindingTable";
 
-  bufferCI = {};
-  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bufferCI.size = sShaderGroupHandleSize * 3;
   bufferCI.usage =
     VK_BUFFER_USAGE_RAY_TRACING_BIT_NV | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
@@ -2290,7 +2343,7 @@ static tl::expected<void, std::system_error> Draw() noexcept {
   VkDeviceSize rayGenOffset = 0;
   VkDeviceSize missOffset = sShaderGroupHandleSize;
   VkDeviceSize missStride = sShaderGroupHandleSize;
-  VkDeviceSize hitGroupOffset = sShaderGroupHandleSize;
+  VkDeviceSize hitGroupOffset = missOffset + missStride;
   VkDeviceSize hitGroupStride = sShaderGroupHandleSize;
 
   vkCmdTraceRaysNV(
