@@ -29,7 +29,8 @@ void main() {
   float tmax = 10000.f;
 
   traceNV(topLevelAS, rayFlags, cullMask, 0 /* sbtRecordOffset */,
-    16 /* sbtRecordStride == sizeof(Sphere) (in bytes) */, 0 /* missIndex */,
-    camera.origin.xyz, tmin, direction, tmax, 0 /* payload */);
+    24 /* sbtRecordStride */, 0 /* missIndex */, camera.origin.xyz, tmin,
+    direction, tmax, 0 /* payload */);
+
   imageStore(image, ivec2(gl_LaunchIDNV.xy), vec4(hitValue, 1.f));
 }

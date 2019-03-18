@@ -1961,7 +1961,8 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
   VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
   bufferCI.size = gsl::narrow_cast<std::uint32_t>(
-    sShaderGroupHandleSize * 3 + sizeof(Sphere) * sSpheres.size());
+    sShaderGroupHandleSize * 2 +
+    (sShaderGroupHandleSize + sizeof(Sphere)) * sSpheres.size());
   bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
   VmaAllocationCreateInfo allocationCI = {};
@@ -2004,7 +2005,7 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
     std::memcpy(stagingData + offset,
                 shaderGroupHandles.data() + (sShaderGroupHandleSize * 2),
                 sShaderGroupHandleSize);
-    offset + sShaderGroupHandleSize;
+    offset += sShaderGroupHandleSize;
 
     std::memcpy(stagingData + offset, &sphere, sizeof(Sphere));
     offset += sizeof(Sphere);
