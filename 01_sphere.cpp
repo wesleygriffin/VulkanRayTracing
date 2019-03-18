@@ -2000,11 +2000,12 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
   offset += sShaderGroupHandleSize;
 
   // hit groups
-  std::memcpy(stagingData + offset, shaderGroupHandles.data() + offset,
-              sShaderGroupHandleSize);
-  offset += sShaderGroupHandleSize;
-
   for (auto&& sphere : sSpheres) {
+    std::memcpy(stagingData + offset,
+                shaderGroupHandles.data() + (sShaderGroupHandleSize * 2),
+                sShaderGroupHandleSize);
+    offset + sShaderGroupHandleSize;
+
     std::memcpy(stagingData + offset, &sphere, sizeof(Sphere));
     offset += sizeof(Sphere);
   }
@@ -2298,7 +2299,7 @@ static tl::expected<void, std::system_error> Draw() noexcept {
   VkDeviceSize missOffset = sShaderGroupHandleSize;
   VkDeviceSize missStride = sShaderGroupHandleSize;
   VkDeviceSize hitGroupOffset = missOffset + missStride;
-  VkDeviceSize hitGroupStride = sShaderGroupHandleSize;
+  VkDeviceSize hitGroupStride = sShaderGroupHandleSize + sizeof(Sphere);
 
   vkCmdTraceRaysNV(
     frame.commandBuffer, sShaderBindingTable, rayGenOffset, sShaderBindingTable,
