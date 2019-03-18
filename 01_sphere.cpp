@@ -29,6 +29,7 @@ using PFN_vkCmdCopyBuffer = decltype(vkCmdCopyBuffer);
 #include "vk_mem_alloc.h"
 // clang-format on
 
+#include "camera.hpp"
 #include "expected.hpp"
 #include "glm/common.hpp"
 #include "glm/mat4x4.hpp"
@@ -62,6 +63,10 @@ using PFN_vkCmdCopyBuffer = decltype(vkCmdCopyBuffer);
 static constexpr std::uint32_t const kWindowWidth = 1600;
 static constexpr std::uint32_t const kWindowHeight = 800;
 
+static Camera sCamera(90.f,
+                      static_cast<float>(kWindowWidth) /
+                        static_cast<float>(kWindowHeight));
+
 struct AABB {
   glm::vec3 min;
   glm::vec3 max;
@@ -86,12 +91,12 @@ struct Sphere {
   }
 }; // struct Spheres
 
-std::array<Sphere, 2> sSpheres = {
+static std::array<Sphere, 2> sSpheres = {
   Sphere(glm::vec3(0.f, 0.f, -1.f), .5f),
-  Sphere(glm::vec3(0.f, -100.f, -1.f), 100.f),
+  Sphere(glm::vec3(0.f, -100.5f, -1.f), 100.f),
 };
 
-std::array<AABB, 2> sAABBs = {
+static std::array<AABB, 2> sAABBs = {
   sSpheres[0].aabb(),
   sSpheres[1].aabb(),
 };
@@ -1601,21 +1606,46 @@ CreateBottomLevelAccelerationStructures() noexcept {
   std::memcpy(aabbData, sAABBs.data(), sizeof(AABB) * sAABBs.size());
   vmaUnmapMemory(sAllocator, aabbBufferAllocation);
 
-  VkGeometryNV geometry = {};
-  geometry.sType = VK_STRUCTURE_TYPE_GEOMETRY_NV;
-  geometry.geometryType = VK_GEOMETRY_TYPE_AABBS_NV;
-  geometry.flags = VK_GEOMETRY_OPAQUE_BIT_NV;
+  VkGeometryTrianglesNV triangles = {};
+  triangles.sType = VK_STRUCTURE_TYPE_GEOMETRY_TRIANGLES_NV;
 
-  // I think I see how the validation layers are reading the spec to require
-  // this, but I disagree that its the right interpretation of the spec.
-  geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_GEOMETRY_TRIANGLES_NV;
+  std::array<VkGeometryNV, 2> geometries;
 
-  geometry.geometry.aabbs.sType = VK_STRUCTURE_TYPE_GEOMETRY_AABB_NV;
-  geometry.geometry.aabbs.aabbData = aabbBuffer;
-  geometry.geometry.aabbs.numAABBs =
-    gsl::narrow_cast<std::uint32_t>(sAABBs.size());
-  geometry.geometry.aabbs.stride = sizeof(AABB);
-  geometry.geometry.aabbs.offset = 0;
+  geometries[0] = {
+    VK_STRUCTURE_TYPE_GEOMETRY_NV, // sType
+    nullptr,                       // pNext
+    VK_GEOMETRY_TYPE_AABBS_NV,     // geometryType
+    {
+      triangles,
+      {
+        VK_STRUCTURE_TYPE_GEOMETRY_AABB_NV, // sType
+        nullptr,                            // pNext
+        aabbBuffer,                         // aabbData
+        1,                                  // numAABBs
+        sizeof(AABB),                       // stride
+        0                                   // offset
+      }                                     // aabb
+    },                                      // geometry
+    VK_GEOMETRY_OPAQUE_BIT_NV               // flags
+  };
+
+  geometries[1] = {
+    VK_STRUCTURE_TYPE_GEOMETRY_NV, // sType
+    nullptr,                       // pNext
+    VK_GEOMETRY_TYPE_AABBS_NV,     // geometryType
+    {
+      triangles,
+      {
+        VK_STRUCTURE_TYPE_GEOMETRY_AABB_NV, // sType
+        nullptr,                            // pNext
+        aabbBuffer,                         // aabbData
+        1,                                  // numAABBs
+        sizeof(AABB),                       // stride
+        sizeof(AABB)                        // offset
+      }                                     // aabb
+    },                                      // geometry
+    VK_GEOMETRY_OPAQUE_BIT_NV               // flags
+  };
 
   VkAccelerationStructureCreateInfoNV accelerationStructureCI = {};
   accelerationStructureCI.sType =
@@ -1627,8 +1657,9 @@ CreateBottomLevelAccelerationStructures() noexcept {
     VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_NV;
   accelerationStructureCI.info.flags = 0;
   accelerationStructureCI.info.instanceCount = 0;
-  accelerationStructureCI.info.geometryCount = 1;
-  accelerationStructureCI.info.pGeometries = &geometry;
+  accelerationStructureCI.info.geometryCount =
+    gsl::narrow_cast<std::uint32_t>(geometries.size());
+  accelerationStructureCI.info.pGeometries = geometries.data();
 
   if (auto result = vkCreateAccelerationStructureNV(
         sDevice, &accelerationStructureCI, nullptr,
@@ -1946,6 +1977,7 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
 
   vkGetPhysicalDeviceProperties2(sPhysicalDevice, &props);
   sShaderGroupHandleSize = rtProps.shaderGroupHandleSize;
+  std::fprintf(stderr, "sShaderGroupHandleSize: %d\n", sShaderGroupHandleSize);
 
   std::vector<std::byte> shaderGroupHandles(sShaderGroupHandleSize * 3);
 
@@ -2196,12 +2228,18 @@ static tl::expected<void, std::system_error> RecreateSwapchain() noexcept {
   // TODO: Clean up swapchain, swapchain image views, framebuffers
 
   // clang-format off
-  return CreateSwapchain()
+  auto result = CreateSwapchain()
     .and_then(CreateSwapchainImagesAndViews)
     .and_then(CreateFramebuffers)
     .and_then(CreateOutputImage)
     ;
   // clang-format on
+
+  sCamera = Camera(90.f,
+                   static_cast<float>(sSwapchainExtent.width) /
+                     static_cast<float>(sSwapchainExtent.height));
+
+  return result;
 } // RecreateSwapchain
 
 static tl::expected<void, std::system_error> Draw() noexcept {
@@ -2259,10 +2297,10 @@ static tl::expected<void, std::system_error> Draw() noexcept {
     return tl::unexpected(ptr.error());
   }
 
-  uniformBufferData->lowerLeft = glm::vec4(-2.f, -1.f, -1.f, 0.f);
-  uniformBufferData->horizontal = glm::vec4(4.f, 0.f, 0.f, 0.f);
-  uniformBufferData->vertical = glm::vec4(0.f, 2.f, 0.f, 0.f);
-  uniformBufferData->origin = glm::vec4(0.f, 0.f, 0.f, 0.f);
+  uniformBufferData->lowerLeft = glm::vec4(sCamera.lowerLeft(), 0.f);
+  uniformBufferData->horizontal = glm::vec4(sCamera.horizontal(), 0.f);
+  uniformBufferData->vertical = glm::vec4(sCamera.vertical(), 0.f);
+  uniformBufferData->origin = glm::vec4(sCamera.origin(), 0.f);
 
   vmaUnmapMemory(sAllocator, sUniformBufferAllocation);
 
@@ -2428,7 +2466,9 @@ int main() {
     std::exit(EXIT_FAILURE);
   }
 
-  vkDeviceWaitIdle(sDevice); // allow all initialization to complete
+  sCamera = Camera(90.f,
+                   static_cast<float>(sSwapchainExtent.width) /
+                     static_cast<float>(sSwapchainExtent.height));
 
   while (!glfwWindowShouldClose(sWindow)) {
     glfwPollEvents();
