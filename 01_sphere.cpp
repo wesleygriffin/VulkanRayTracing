@@ -1576,7 +1576,7 @@ CreateBottomLevelAccelerationStructures() noexcept {
   VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
   bufferCI.size = sizeof(AABB) * sAABBs.size();
-  bufferCI.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+  bufferCI.usage = VK_BUFFER_USAGE_RAY_TRACING_BIT_NV;
 
   VmaAllocationCreateInfo allocationCI = {};
   allocationCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
@@ -1688,6 +1688,53 @@ CreateBottomLevelAccelerationStructures() noexcept {
       vk::make_error_code(result), "vkBindAccelerationStructureMemoryNV"));
   }
 
+  memReqInfo.type =
+    VK_ACCELERATION_STRUCTURE_MEMORY_REQUIREMENTS_TYPE_BUILD_SCRATCH_NV;
+
+  VkMemoryRequirements2 bottomLevelMemReq = {};
+  bottomLevelMemReq.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+
+  memReqInfo.accelerationStructure = sBottomLevelAccelerationStructure;
+  vkGetAccelerationStructureMemoryRequirementsNV(sDevice, &memReqInfo,
+                                                 &bottomLevelMemReq);
+
+  VkBuffer scratchBuffer;
+  VmaAllocation scratchAllocation;
+
+  bufferCI = {};
+  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferCI.size = bottomLevelMemReq.memoryRequirements.size;
+  bufferCI.usage = VK_BUFFER_USAGE_RAY_TRACING_BIT_NV;
+
+  allocationCI = {};
+  allocationCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+  if (auto result =
+        vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI, &scratchBuffer,
+                        &scratchAllocation, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
+  }
+
+  auto commandBuffer = BeginOneTimeSubmit();
+  if (!commandBuffer) {
+    LOG_LEAVE();
+    return tl::unexpected(commandBuffer.error());
+  }
+
+  vkCmdBuildAccelerationStructureNV(
+    *commandBuffer, &accelerationStructureCI.info,
+    VK_NULL_HANDLE /* instanceData */, 0 /* instanceOffset */,
+    VK_FALSE /* update */, sBottomLevelAccelerationStructure /* dst */,
+    VK_NULL_HANDLE /* src */, scratchBuffer, 0 /* scratchOffset */);
+
+  if (auto result = EndOneTimeSubmit(*commandBuffer); !result) {
+    LOG_LEAVE();
+    return tl::unexpected(result.error());
+  }
+
   vmaDestroyBuffer(sAllocator, aabbBuffer, aabbBufferAllocation);
 
   Ensures(sBottomLevelAccelerationStructure != VK_NULL_HANDLE);
@@ -1772,82 +1819,6 @@ CreateTopLevelAccelerationStructure() noexcept {
       vk::make_error_code(result), "vkBindAccelerationStructureMemoryNV"));
   }
 
-  Ensures(sTopLevelAccelerationStructure != VK_NULL_HANDLE);
-  Ensures(sTopLevelAccelerationStructureAllocation != VK_NULL_HANDLE);
-
-  LOG_LEAVE();
-  return {};
-} // CreateTopLevelAccelerationStructure
-
-static tl::expected<void, std::system_error> BuildAccelerationStructures() noexcept {
-  LOG_ENTER();
-  Expects(sDevice != VK_NULL_HANDLE);
-  Expects(sAllocator != VK_NULL_HANDLE);
-  Expects(sBottomLevelAccelerationStructure != VK_NULL_HANDLE);
-  Expects(sTopLevelAccelerationStructure != VK_NULL_HANDLE);
-
-  VkBuffer aabbBuffer;
-  VmaAllocation aabbBufferAllocation;
-
-  VkBufferCreateInfo bufferCI = {};
-  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bufferCI.size = sizeof(AABB) * sAABBs.size();
-  bufferCI.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-
-  VmaAllocationCreateInfo allocationCI = {};
-  allocationCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-
-  if (auto result =
-        vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI, &aabbBuffer,
-                        &aabbBufferAllocation, nullptr);
-      result != VK_SUCCESS) {
-    LOG_LEAVE();
-    return tl::unexpected(
-      std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
-  }
-
-  AABB* aabbData;
-  if (auto ptr = MapMemory<AABB*>(sAllocator, aabbBufferAllocation)) {
-    aabbData = *ptr;
-  } else {
-    LOG_LEAVE();
-    return tl::unexpected(ptr.error());
-  }
-
-  std::memcpy(aabbData, sAABBs.data(), sizeof(AABB) * sAABBs.size());
-  vmaUnmapMemory(sAllocator, aabbBufferAllocation);
-
-  VkGeometryNV geometry = {};
-  geometry.sType = VK_STRUCTURE_TYPE_GEOMETRY_NV;
-  geometry.geometryType = VK_GEOMETRY_TYPE_AABBS_NV;
-  geometry.flags = VK_GEOMETRY_OPAQUE_BIT_NV;
-
-  // I think I see how the validation layers are reading the spec to require
-  // this, but I disagree that its the right interpretation of the spec.
-  geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_GEOMETRY_TRIANGLES_NV;
-
-  geometry.geometry.aabbs.sType = VK_STRUCTURE_TYPE_GEOMETRY_AABB_NV;
-  geometry.geometry.aabbs.aabbData = aabbBuffer;
-  geometry.geometry.aabbs.numAABBs =
-    gsl::narrow_cast<std::uint32_t>(sAABBs.size());
-  geometry.geometry.aabbs.stride = sizeof(AABB);
-  geometry.geometry.aabbs.offset = 0;
-
-  VkAccelerationStructureInfoNV bottomLevelASInfo = {};
-  bottomLevelASInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_INFO_NV;
-  bottomLevelASInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_NV;
-  bottomLevelASInfo.flags = 0;
-  bottomLevelASInfo.instanceCount = 0;
-  bottomLevelASInfo.geometryCount = 1;
-  bottomLevelASInfo.pGeometries = &geometry;
-
-  VkAccelerationStructureInfoNV topLevelASInfo = {};
-  topLevelASInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_INFO_NV;
-  topLevelASInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_NV;
-  topLevelASInfo.flags = 0;
-  topLevelASInfo.instanceCount = 1;
-  topLevelASInfo.geometryCount = 0;
-
   std::array<std::byte, 8> bottomLevelHandle;
   if (auto result = vkGetAccelerationStructureHandleNV(
         sDevice, sBottomLevelAccelerationStructure, bottomLevelHandle.size(),
@@ -1861,7 +1832,7 @@ static tl::expected<void, std::system_error> BuildAccelerationStructures() noexc
   VkBuffer instanceBuffer;
   VmaAllocation instanceAllocation;
 
-  bufferCI = {};
+  VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
   bufferCI.size = 64;
   bufferCI.usage = VK_BUFFER_USAGE_RAY_TRACING_BIT_NV;
@@ -1904,18 +1875,8 @@ static tl::expected<void, std::system_error> BuildAccelerationStructures() noexc
 
   vmaUnmapMemory(sAllocator, instanceAllocation);
 
-  VkAccelerationStructureMemoryRequirementsInfoNV memReqInfo = {};
-  memReqInfo.sType =
-    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_MEMORY_REQUIREMENTS_INFO_NV;
   memReqInfo.type =
     VK_ACCELERATION_STRUCTURE_MEMORY_REQUIREMENTS_TYPE_BUILD_SCRATCH_NV;
-
-  VkMemoryRequirements2 bottomLevelMemReq = {};
-  bottomLevelMemReq.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
-
-  memReqInfo.accelerationStructure = sBottomLevelAccelerationStructure;
-  vkGetAccelerationStructureMemoryRequirementsNV(sDevice, &memReqInfo,
-                                                 &bottomLevelMemReq);
 
   VkMemoryRequirements2 topLevelMemReq = {};
   topLevelMemReq.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
@@ -1929,8 +1890,7 @@ static tl::expected<void, std::system_error> BuildAccelerationStructures() noexc
 
   bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bufferCI.size = bottomLevelMemReq.memoryRequirements.size +
-                  topLevelMemReq.memoryRequirements.size;
+  bufferCI.size = topLevelMemReq.memoryRequirements.size;
   bufferCI.usage = VK_BUFFER_USAGE_RAY_TRACING_BIT_NV;
 
   allocationCI = {};
@@ -1952,36 +1912,22 @@ static tl::expected<void, std::system_error> BuildAccelerationStructures() noexc
   }
 
   vkCmdBuildAccelerationStructureNV(
-    *commandBuffer, &bottomLevelASInfo, VK_NULL_HANDLE /* instanceData */,
-    0 /* instanceOffset */, VK_FALSE /* update */,
-    sBottomLevelAccelerationStructure /* dst */, VK_NULL_HANDLE /* src */,
-    scratchBuffer, 0 /* scratchOffset */);
-
-  VkMemoryBarrier barrier = {};
-  barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-  barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_NV;
-  barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_NV;
-
-  vkCmdPipelineBarrier(*commandBuffer,
-                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_NV,
-                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_NV, 0,
-                       1, &barrier, 0, nullptr, 0, nullptr);
-
-  vkCmdBuildAccelerationStructureNV(
-    *commandBuffer, &topLevelASInfo, instanceBuffer /* instanceData */,
-    0 /* instanceOffset */, VK_FALSE /* update */,
-    sTopLevelAccelerationStructure /* dst */, VK_NULL_HANDLE /* src */,
-    scratchBuffer,
-    bottomLevelMemReq.memoryRequirements.size /* scratchOffset */);
+    *commandBuffer, &accelerationStructureCI.info,
+    instanceBuffer /* instanceData */, 0 /* instanceOffset */,
+    VK_FALSE /* update */, sTopLevelAccelerationStructure /* dst */,
+    VK_NULL_HANDLE /* src */, scratchBuffer, 0 /* scratchOffset */);
 
   if (auto result = EndOneTimeSubmit(*commandBuffer); !result) {
     LOG_LEAVE();
     return tl::unexpected(result.error());
   }
 
+  Ensures(sTopLevelAccelerationStructure != VK_NULL_HANDLE);
+  Ensures(sTopLevelAccelerationStructureAllocation != VK_NULL_HANDLE);
+
   LOG_LEAVE();
   return {};
-} // BuildAccelerationStructures
+} // CreateTopLevelAccelerationStructure
 
 static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept {
   LOG_ENTER();
@@ -2469,7 +2415,6 @@ int main() {
     .and_then(CreateOutputImage)
     .and_then(CreateBottomLevelAccelerationStructures)
     .and_then(CreateTopLevelAccelerationStructure)
-    .and_then(BuildAccelerationStructures)
     .and_then(CreateShaderBindingTable)
     .and_then(CreateDescriptorSets)
     .and_then(CreateSyncObjects)
