@@ -2059,7 +2059,7 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
   offset += sShaderGroupHandleSize;
 
   for (auto&& sphere : sSpheres) {
-    std::memcpy(stagingData + offset, &sSpheres[0], sizeof(Sphere));
+    std::memcpy(stagingData + offset, &sphere, sizeof(Sphere));
     offset += sizeof(Sphere);
   }
 
