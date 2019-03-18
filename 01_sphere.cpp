@@ -59,12 +59,12 @@ using PFN_vkCmdCopyBuffer = decltype(vkCmdCopyBuffer);
 
 #endif
 
-static constexpr std::uint32_t const kWindowWidth = 1000;
-static constexpr std::uint32_t const kWindowHeight = 1000;
+static constexpr std::uint32_t const kWindowWidth = 1600;
+static constexpr std::uint32_t const kWindowHeight = 800;
 
 struct AABB {
-  alignas(4) glm::vec3 min;
-  alignas(4) glm::vec3 max;
+  glm::vec3 min;
+  glm::vec3 max;
 
   AABB(glm::vec3 p, glm::vec3 q)
   noexcept
@@ -73,7 +73,7 @@ struct AABB {
 }; // struct AABB
 
 struct Sphere {
-  alignas(16) glm::vec4 centerRadius;
+  glm::vec4 centerRadius;
 
   Sphere(glm::vec3 c, float r) noexcept
     : centerRadius(std::move(c), r) {}
@@ -149,10 +149,10 @@ static VkPipelineLayout sPipelineLayout = VK_NULL_HANDLE;
 static VkPipeline sPipeline = VK_NULL_HANDLE;
 
 struct UniformBuffer {
-  alignas(16) glm::vec4 lowerLeft;
-  alignas(16) glm::vec4 horizontal;
-  alignas(16) glm::vec4 vertical;
-  alignas(16) glm::vec4 origin;
+  glm::vec4 lowerLeft;
+  glm::vec4 horizontal;
+  glm::vec4 vertical;
+  glm::vec4 origin;
 }; // struct UniformBuffer
 
 static VkBuffer sUniformBuffer = VK_NULL_HANDLE;

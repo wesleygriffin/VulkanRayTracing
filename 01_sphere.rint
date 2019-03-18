@@ -23,11 +23,11 @@ void main() {
 
     if (gl_RayTminNV < t1 && t1 < gl_RayTmaxNV) {
       vec3 hitValue = gl_WorldRayOriginNV + gl_WorldRayDirectionNV * t1;
-      normalVector = (hitValue - center) / radius;
+      normalVector = normalize((hitValue - center) / radius);
       reportIntersectionNV(t1, 0);
     } else if (gl_RayTminNV < t2 && t2 < gl_RayTmaxNV) {
       vec3 hitValue = gl_WorldRayOriginNV + gl_WorldRayDirectionNV * t2;
-      normalVector = (hitValue - center) / radius;
+      normalVector = normalize((hitValue - center) / radius);
       reportIntersectionNV(t2, 0);
     }
   }

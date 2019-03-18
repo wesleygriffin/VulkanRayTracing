@@ -18,8 +18,7 @@ layout(shaderRecordNV) buffer Sphere {
 layout(location = 0) rayPayloadNV vec3 hitValue;
 
 void main() {
-  const vec2 pixelCenter = vec2(gl_LaunchIDNV.xy) + vec2(.5f);
-  const vec2 uv = pixelCenter / vec2(gl_LaunchSizeNV.xy);
+  const vec2 uv = vec2(gl_LaunchIDNV.xy) / vec2(gl_LaunchSizeNV.xy);
   const vec3 direction = camera.lowerLeft.xyz +
     uv.x * camera.horizontal.xyz + uv.y * camera.vertical.xyz;
 
@@ -29,7 +28,7 @@ void main() {
   float tmax = 10000.f;
 
   traceNV(topLevelAS, rayFlags, cullMask, 0 /* sbtRecordOffset */,
-    24 /* sbtRecordStride */, 0 /* missIndex */, camera.origin.xyz, tmin,
+    0 /* sbtRecordStride */, 0 /* missIndex */, camera.origin.xyz, tmin,
     direction, tmax, 0 /* payload */);
 
   imageStore(image, ivec2(gl_LaunchIDNV.xy), vec4(hitValue, 1.f));
