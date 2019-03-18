@@ -5,10 +5,10 @@ layout(set = 0, binding = 0) uniform accelerationStructureNV topLevelAS;
 layout(set = 0, binding = 1, rgba8) uniform image2D image;
 
 layout(set = 0, binding = 2) uniform Camera {
-  vec4 lowerLeft;
-  vec4 horizontal;
-  vec4 vertical;
-  vec4 origin;
+  vec4 Eye;
+  vec4 U;
+  vec4 V;
+  vec4 W;
 } camera;
 
 layout(shaderRecordNV) buffer Sphere {
@@ -18,9 +18,10 @@ layout(shaderRecordNV) buffer Sphere {
 layout(location = 0) rayPayloadNV vec3 hitValue;
 
 void main() {
-  const vec2 uv = vec2(gl_LaunchIDNV.xy) / vec2(gl_LaunchSizeNV.xy);
-  const vec3 direction = camera.lowerLeft.xyz +
-    uv.x * camera.horizontal.xyz + uv.y * camera.vertical.xyz;
+  const vec2 d = vec2(gl_LaunchIDNV.xy) / vec2(gl_LaunchSizeNV.xy) * 2.f - 1.f;
+  const vec3 origin = camera.Eye.xyz;
+  const vec3 direction = normalize(d.x * camera.U.xyz + d.y * camera.V.xyz +
+    camera.W.xyz);
 
   uint rayFlags = gl_RayFlagsOpaqueNV;
   uint cullMask = 0xFF;
@@ -28,8 +29,8 @@ void main() {
   float tmax = 10000.f;
 
   traceNV(topLevelAS, rayFlags, cullMask, 0 /* sbtRecordOffset */,
-    0 /* sbtRecordStride */, 0 /* missIndex */, camera.origin.xyz, tmin,
-    direction, tmax, 0 /* payload */);
+    0 /* sbtRecordStride */, 0 /* missIndex */, origin, tmin, direction, tmax,
+    0 /* payload */);
 
   imageStore(image, ivec2(gl_LaunchIDNV.xy), vec4(hitValue, 1.f));
 }

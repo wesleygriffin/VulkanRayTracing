@@ -65,7 +65,12 @@ static constexpr std::uint32_t const kWindowHeight = 800;
 
 static Camera sCamera(90.f,
                       static_cast<float>(kWindowWidth) /
-                        static_cast<float>(kWindowHeight));
+                        static_cast<float>(kWindowHeight),
+                      glm::vec3(0.f, 0.f, 0.f), glm::vec3(0.f, 0.f, -1.f),
+                      glm::vec3(0.f, -1.f, 0.f));
+
+static void UpdateCamera() noexcept {
+} // UpdateCamera
 
 struct AABB {
   glm::vec3 min;
@@ -154,10 +159,10 @@ static VkPipelineLayout sPipelineLayout = VK_NULL_HANDLE;
 static VkPipeline sPipeline = VK_NULL_HANDLE;
 
 struct UniformBuffer {
-  glm::vec4 lowerLeft;
-  glm::vec4 horizontal;
-  glm::vec4 vertical;
-  glm::vec4 origin;
+  glm::vec4 Eye;
+  glm::vec4 U;
+  glm::vec4 V;
+  glm::vec4 W;
 }; // struct UniformBuffer
 
 static VkBuffer sUniformBuffer = VK_NULL_HANDLE;
@@ -2235,10 +2240,8 @@ static tl::expected<void, std::system_error> RecreateSwapchain() noexcept {
     ;
   // clang-format on
 
-  sCamera = Camera(90.f,
-                   static_cast<float>(sSwapchainExtent.width) /
-                     static_cast<float>(sSwapchainExtent.height));
-
+  sCamera.aspectRatio(static_cast<float>(sSwapchainExtent.width) /
+                      static_cast<float>(sSwapchainExtent.height));
   return result;
 } // RecreateSwapchain
 
@@ -2297,10 +2300,10 @@ static tl::expected<void, std::system_error> Draw() noexcept {
     return tl::unexpected(ptr.error());
   }
 
-  uniformBufferData->lowerLeft = glm::vec4(sCamera.lowerLeft(), 0.f);
-  uniformBufferData->horizontal = glm::vec4(sCamera.horizontal(), 0.f);
-  uniformBufferData->vertical = glm::vec4(sCamera.vertical(), 0.f);
-  uniformBufferData->origin = glm::vec4(sCamera.origin(), 0.f);
+  uniformBufferData->Eye = glm::vec4(sCamera.eye(), 1.f);
+  uniformBufferData->U = glm::vec4(sCamera.u(), 0.f);
+  uniformBufferData->V = glm::vec4(sCamera.v(), 0.f);
+  uniformBufferData->W = glm::vec4(sCamera.w(), 0.f);
 
   vmaUnmapMemory(sAllocator, sUniformBufferAllocation);
 
@@ -2466,12 +2469,17 @@ int main() {
     std::exit(EXIT_FAILURE);
   }
 
-  sCamera = Camera(90.f,
-                   static_cast<float>(sSwapchainExtent.width) /
-                     static_cast<float>(sSwapchainExtent.height));
+  sCamera.aspectRatio(static_cast<float>(sSwapchainExtent.width) /
+                      static_cast<float>(sSwapchainExtent.height));
 
   while (!glfwWindowShouldClose(sWindow)) {
     glfwPollEvents();
+
+    if (glfwGetKey(sWindow, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+      glfwSetWindowShouldClose(sWindow, true);
+      continue;
+    }
+
     if (result = Draw(); !result) {
       std::fprintf(stderr, "%s\n", result.error().what());
       std::exit(EXIT_FAILURE);
