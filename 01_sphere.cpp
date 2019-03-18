@@ -32,6 +32,7 @@ using PFN_vkCmdCopyBuffer = decltype(vkCmdCopyBuffer);
 #include "expected.hpp"
 #include "glm/common.hpp"
 #include "glm/mat4x4.hpp"
+#include "glm/gtc/matrix_transform.hpp"
 #include "gsl/gsl-lite.hpp"
 #include "vk_result.hpp"
 #include <array>
@@ -114,11 +115,10 @@ static VkPipelineLayout sPipelineLayout = VK_NULL_HANDLE;
 static VkPipeline sPipeline = VK_NULL_HANDLE;
 
 struct UniformBuffer {
-  alignas(16) glm::mat4 model;
-  alignas(16) glm::mat4 view;
-  alignas(16) glm::mat4 proj;
-  alignas(16) glm::mat4 viewInverse;
-  alignas(16) glm::mat4 projInverse;
+  alignas(16) glm::vec4 lowerLeft;
+  alignas(16) glm::vec4 horizontal;
+  alignas(16) glm::vec4 vertical;
+  alignas(16) glm::vec4 origin;
 }; // struct UniformBuffer
 
 static VkBuffer sUniformBuffer = VK_NULL_HANDLE;
@@ -153,6 +153,18 @@ void NameObject(VkDevice device, VkObjectType objectType, T objectHandle,
   vkSetDebugUtilsObjectNameEXT(device, &objectNameInfo);
 #endif
 } // NameObject
+
+template <class T>
+tl::expected<T, std::system_error>
+MapMemory(VmaAllocator allocator, VmaAllocation allocation) noexcept {
+  void* ptr;
+  if (auto result = vmaMapMemory(allocator, allocation, &ptr);
+      result != VK_SUCCESS) {
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaMapMemory"));
+  }
+  return reinterpret_cast<T>(ptr);
+} // MapMemory
 
 static void FramebufferResized(GLFWwindow*, int, int) noexcept {
   sFramebufferResized = true;
@@ -1249,7 +1261,7 @@ CreateDescriptorSetLayout() noexcept {
   uniformBufferLB.binding = 2;
   uniformBufferLB.descriptorCount = 1;
   uniformBufferLB.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-  outputImageLB.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_NV;
+  uniformBufferLB.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_NV;
 
   std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
     accelerationStructureLB, outputImageLB, uniformBufferLB};
@@ -1541,15 +1553,14 @@ CreateBottomLevelAccelerationStructures() noexcept {
       std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
   }
 
-  void* aabbRaw;
-  if (auto result = vmaMapMemory(sAllocator, aabbBufferAllocation, &aabbRaw);
-      result != VK_SUCCESS) {
+  float* aabbData;
+  if (auto ptr = MapMemory<float*>(sAllocator, aabbBufferAllocation)) {
+    aabbData = *ptr;
+  } else {
     LOG_LEAVE();
-    return tl::unexpected(
-      std::system_error(vk::make_error_code(result), "vmaMapMemory"));
+    return tl::unexpected(ptr.error());
   }
 
-  float* aabbData = reinterpret_cast<float*>(aabbRaw);
   aabbData[0] = aabbData[1] = aabbData[2] = -1.f; // min
   aabbData[3] = aabbData[4] = aabbData[5] = 1.f;  // max
 
@@ -1759,15 +1770,14 @@ static tl::expected<void, std::system_error> BuildAccelerationStructures() noexc
       std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
   }
 
-  void* aabbRaw;
-  if (auto result = vmaMapMemory(sAllocator, aabbBufferAllocation, &aabbRaw);
-      result != VK_SUCCESS) {
+  float* aabbData;
+  if (auto ptr = MapMemory<float*>(sAllocator, aabbBufferAllocation)) {
+    aabbData = *ptr;
+  } else {
     LOG_LEAVE();
-    return tl::unexpected(
-      std::system_error(vk::make_error_code(result), "vmaMapMemory"));
+    return tl::unexpected(ptr.error());
   }
 
-  float* aabbData = reinterpret_cast<float*>(aabbRaw);
   aabbData[0] = aabbData[1] = aabbData[2] = -1.f; // min
   aabbData[3] = aabbData[4] = aabbData[5] = 1.f;  // max
 
@@ -1842,15 +1852,14 @@ static tl::expected<void, std::system_error> BuildAccelerationStructures() noexc
     std::uint64_t accelerationStructureHandle;
   };
 
-  void* instanceRaw;
-  if (auto result = vmaMapMemory(sAllocator, instanceAllocation, &instanceRaw);
-      result != VK_SUCCESS) {
+  Instance* instanceData;
+  if (auto ptr = MapMemory<Instance*>(sAllocator, instanceAllocation)) {
+    instanceData = *ptr;
+  } else {
     LOG_LEAVE();
-    return tl::unexpected(
-      std::system_error(vk::make_error_code(result), "vmaMapMemory"));
+    return tl::unexpected(ptr.error());
   }
 
-  Instance* instanceData = reinterpret_cast<Instance*>(instanceRaw);
   std::memset(instanceData, sizeof(Instance), 0);
   instanceData->mask = 0xF;
   instanceData->accelerationStructureHandle =
@@ -1976,15 +1985,16 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
       std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
   }
 
-  void* pStaging;
-  if (auto result = vmaMapMemory(sAllocator, stagingAllocation, &pStaging);
-      result != VK_SUCCESS) {
+  void* stagingData;
+  if (auto ptr = MapMemory<void*>(sAllocator, stagingAllocation)) {
+    stagingData = *ptr;
+  } else {
     LOG_LEAVE();
-    return tl::unexpected(
-      std::system_error(vk::make_error_code(result), "vmaMapMemory"));
+    return tl::unexpected(ptr.error());
   }
 
-  std::memcpy(pStaging, shaderGroupHandles.data(), shaderGroupHandles.size());
+  std::memcpy(stagingData, shaderGroupHandles.data(),
+              shaderGroupHandles.size());
   vmaUnmapMemory(sAllocator, stagingAllocation);
 
   char objectName[] = "sShaderBindingTable";
@@ -2224,13 +2234,28 @@ static tl::expected<void, std::system_error> Draw() noexcept {
       std::system_error(vk::make_error_code(result), "vkAcquireNextImage2KHR"));
   }
 
-  frame = sFrames[sCurrentFrame];
-
   if (auto result = vkResetCommandPool(sDevice, frame.commandPool, 0);
       result != VK_SUCCESS) {
     return tl::unexpected(
       std::system_error(vk::make_error_code(result), "vkResetCommandPool"));
   }
+
+  frame = sFrames[sCurrentFrame];
+
+  UniformBuffer* uniformBufferData;
+  if (auto ptr =
+        MapMemory<UniformBuffer*>(sAllocator, sUniformBufferAllocation)) {
+    uniformBufferData = *ptr;
+  } else {
+    return tl::unexpected(ptr.error());
+  }
+
+  uniformBufferData->lowerLeft = glm::vec4(-2.f, -1.f, -1.f, 0.f);
+  uniformBufferData->horizontal = glm::vec4(4.f, 0.f, 0.f, 0.f);
+  uniformBufferData->vertical = glm::vec4(0.f, 2.f, 0.f, 0.f);
+  uniformBufferData->origin = glm::vec4(0.f, 0.f, 0.f, 0.f);
+
+  vmaUnmapMemory(sAllocator, sUniformBufferAllocation);
 
   VkCommandBufferBeginInfo commandBufferBI = {};
   commandBufferBI.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
