@@ -2,9 +2,36 @@
 #include "flextVk.h"
 #define VK_VERSION_1_0
 #include "GLFW/glfw3.h"
+
+// vma needs these, flextGL should probably generate them
+using PFN_vkGetPhysicalDeviceProperties =
+  decltype(vkGetPhysicalDeviceProperties);
+using PFN_vkGetPhysicalDeviceMemoryProperties =
+  decltype(vkGetPhysicalDeviceMemoryProperties);
+using PFN_vkAllocateMemory = decltype(vkAllocateMemory);
+using PFN_vkFreeMemory = decltype(vkFreeMemory);
+using PFN_vkMapMemory = decltype(vkMapMemory);
+using PFN_vkUnmapMemory = decltype(vkUnmapMemory);
+using PFN_vkFlushMappedMemoryRanges = decltype(vkFlushMappedMemoryRanges);
+using PFN_vkInvalidateMappedMemoryRanges =
+  decltype(vkInvalidateMappedMemoryRanges);
+using PFN_vkBindBufferMemory = decltype(vkBindBufferMemory);
+using PFN_vkBindImageMemory = decltype(vkBindImageMemory);
+using PFN_vkGetBufferMemoryRequirements =
+  decltype(vkGetBufferMemoryRequirements);
+using PFN_vkGetImageMemoryRequirements = decltype(vkGetImageMemoryRequirements);
+using PFN_vkCreateBuffer = decltype(vkCreateBuffer);
+using PFN_vkDestroyBuffer = decltype(vkDestroyBuffer);
+using PFN_vkCreateImage = decltype(vkCreateImage);
+using PFN_vkDestroyImage = decltype(vkDestroyImage);
+using PFN_vkCmdCopyBuffer = decltype(vkCmdCopyBuffer);
+
+#include "vk_mem_alloc.h"
 // clang-format on
 
 #include "expected.hpp"
+#include "glm/common.hpp"
+#include "glm/mat4x4.hpp"
 #include "gsl/gsl-lite.hpp"
 #include "vk_result.hpp"
 #include <array>
@@ -31,16 +58,17 @@
 
 #endif
 
-static constexpr std::uint32_t const sWindowWidth = 800;
-static constexpr std::uint32_t const sWindowHeight = 600;
+static constexpr std::uint32_t const kWindowWidth = 1000;
+static constexpr std::uint32_t const kWindowHeight = 1000;
 
 static VkPhysicalDeviceFeatures2 sDeviceFeatures = {};
 
-static std::array<gsl::czstring, 4> sDeviceExtensions = {
+static std::array<gsl::czstring, 5> sDeviceExtensions = {
   VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
   VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
   VK_KHR_MAINTENANCE2_EXTENSION_NAME,
   VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+  VK_NV_RAY_TRACING_EXTENSION_NAME,
 };
 
 static GLFWwindow* sWindow = nullptr;
@@ -52,11 +80,68 @@ static VkPhysicalDevice sPhysicalDevice = VK_NULL_HANDLE;
 
 static std::uint32_t sQueueFamilyIndex = UINT32_MAX;
 static VkDevice sDevice = VK_NULL_HANDLE;
+static VkQueue sQueue = VK_NULL_HANDLE;
+static VkCommandPool sCommandPool = VK_NULL_HANDLE;
+static VmaAllocator sAllocator = VK_NULL_HANDLE;
 
+static VkSurfaceFormatKHR sSurfaceColorFormat = {
+  VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
+
+static VkRenderPass sRenderPass = VK_NULL_HANDLE;
 static VkSurfaceKHR sSurface = VK_NULL_HANDLE;
-static VkSwapchainKHR sSwapchain = VK_NULL_HANDLE;
 
-static void Draw() noexcept {} // Draw
+static VkSwapchainKHR sSwapchain = VK_NULL_HANDLE;
+static VkExtent2D sSwapchainExtent;
+static std::vector<VkImage> sSwapchainImages;
+static std::vector<VkImageView> sSwapchainImageViews;
+
+struct Frame {
+  VkSemaphore imageAvailable{VK_NULL_HANDLE};
+  VkCommandPool commandPool{VK_NULL_HANDLE};
+  VkCommandBuffer commandBuffer{VK_NULL_HANDLE};
+  VkFramebuffer framebuffer{VK_NULL_HANDLE};
+}; // struct Frame
+
+static std::uint32_t sCurrentFrame = 0;
+static std::vector<Frame> sFrames;
+static std::vector<VkFence> sFramesComplete;
+static VkSemaphore sRenderFinished = VK_NULL_HANDLE;
+
+static VkDescriptorPool sDescriptorPool = VK_NULL_HANDLE;
+
+static VkDescriptorSetLayout sDescriptorSetLayout = VK_NULL_HANDLE;
+static VkPipelineLayout sPipelineLayout = VK_NULL_HANDLE;
+static VkPipeline sPipeline = VK_NULL_HANDLE;
+
+struct UniformBuffer {
+  alignas(16) glm::mat4 model;
+  alignas(16) glm::mat4 view;
+  alignas(16) glm::mat4 proj;
+  alignas(16) glm::mat4 viewInverse;
+  alignas(16) glm::mat4 projInverse;
+}; // struct UniformBuffer
+
+static VkBuffer sUniformBuffer = VK_NULL_HANDLE;
+static VmaAllocation sUniformBufferAllocation = VK_NULL_HANDLE;
+
+static VkImage sOutputImage = VK_NULL_HANDLE;
+static VmaAllocation sOutputImageAllocation = VK_NULL_HANDLE;
+static VkImageView sOutputImageView = VK_NULL_HANDLE;
+
+static VkAccelerationStructureNV sBottomLevelAccelerationStructure =
+  VK_NULL_HANDLE;
+static VmaAllocation sBottomLevelAccelerationStructureAllocation =
+  VK_NULL_HANDLE;
+
+static VkAccelerationStructureNV sTopLevelAccelerationStructure =
+  VK_NULL_HANDLE;
+static VmaAllocation sTopLevelAccelerationStructureAllocation = VK_NULL_HANDLE;
+
+static std::uint32_t sShaderGroupHandleSize = 0;
+static VkBuffer sShaderBindingTable = VK_NULL_HANDLE;
+static VmaAllocation sShaderBindingTableAllocation = VK_NULL_HANDLE;
+
+static std::vector<VkDescriptorSet> sDescriptorSets;
 
 template <class T>
 void NameObject(VkDevice device, VkObjectType objectType, T objectHandle,
@@ -88,7 +173,7 @@ static tl::expected<void, std::system_error> InitWindow() noexcept {
   glfwSetErrorCallback(ErrorCallback);
 
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-  sWindow = glfwCreateWindow(sWindowWidth, sWindowHeight, "01_sphere", nullptr,
+  sWindow = glfwCreateWindow(kWindowWidth, kWindowHeight, "01_sphere", nullptr,
                              nullptr);
 
   if (!sWindow) {
@@ -152,34 +237,43 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL DebugUtilsMessengerCallback(
   VkDebugUtilsMessageTypeFlagsEXT,
   VkDebugUtilsMessengerCallbackDataEXT const* pCallbackData, void*) noexcept {
 
-  if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-    std::fprintf(stderr, "ERROR  : %s", pCallbackData->pMessage);
-  } else if (messageSeverity >=
-             VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-    std::fprintf(stderr, "WARNING: %s", pCallbackData->pMessage);
-  } else if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
-    std::fprintf(stderr, "   INFO: %s", pCallbackData->pMessage);
-  } else if (messageSeverity >=
-             VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
-    std::fprintf(stderr, "VERBOSE: %s", pCallbackData->pMessage);
-  }
+  auto printObjects = [&]() {
+    if (pCallbackData->objectCount > 0) {
+      std::fprintf(stderr, " Objects:");
+      for (std::uint32_t i = 0; i < pCallbackData->objectCount - 1; ++i) {
+        auto&& pObject = pCallbackData->pObjects[i];
+        std::fprintf(stderr, " %s (%llx),",
+                     pObject.pObjectName ? pObject.pObjectName : "<unnamed>",
+                     pObject.objectHandle);
+      }
 
-  if (pCallbackData->objectCount > 0) {
-    std::fprintf(stderr, " Objects:");
-    for (std::uint32_t i = 0; i < pCallbackData->objectCount - 1; ++i) {
-      auto&& pObject = pCallbackData->pObjects[i];
-      std::fprintf(stderr, " %s (%llx),",
+      auto&& pObject = pCallbackData->pObjects[pCallbackData->objectCount - 1];
+      std::fprintf(stderr, " %s (%llx)",
                    pObject.pObjectName ? pObject.pObjectName : "<unnamed>",
                    pObject.objectHandle);
     }
+  };
 
-    auto&& pObject = pCallbackData->pObjects[pCallbackData->objectCount - 1];
-    std::fprintf(stderr, " %s (%llx)",
-                 pObject.pObjectName ? pObject.pObjectName : "<unnamed>",
-                 pObject.objectHandle);
+  if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+    std::fprintf(stderr, "ERROR  : %s", pCallbackData->pMessage);
+    printObjects();
+    std::fprintf(stderr, "\n");
+  } else if (messageSeverity >=
+             VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+    std::fprintf(stderr, "WARNING: %s", pCallbackData->pMessage);
+    printObjects();
+    std::fprintf(stderr, "\n");
+  } else if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
+    //std::fprintf(stderr, "   INFO: %s", pCallbackData->pMessage);
+    //printObjects();
+    //std::fprintf(stderr, "\n");
+  } else if (messageSeverity >=
+             VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
+    //std::fprintf(stderr, "VERBOSE: %s", pCallbackData->pMessage);
+    //printObjects();
+    //std::fprintf(stderr, "\n");
   }
 
-  std::fprintf(stderr, "\n");
   return VK_FALSE;
 } // DebugUtilsMessengerCallback
 
@@ -529,17 +623,246 @@ static tl::expected<void, std::system_error> CreateDevice() noexcept {
              "sPhysicalDevice");
   NameObject(sDevice, VK_OBJECT_TYPE_DEVICE, sDevice, "sDevice");
 
+  VkDeviceQueueInfo2 deviceQueueInfo = {};
+  deviceQueueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2;
+  deviceQueueInfo.queueFamilyIndex = sQueueFamilyIndex;
+  deviceQueueInfo.queueIndex = 0;
+
+  vkGetDeviceQueue2(sDevice, &deviceQueueInfo, &sQueue);
+
+  NameObject(sDevice, VK_OBJECT_TYPE_QUEUE, sQueue, "sQueue");
+
   Ensures(sDevice != VK_NULL_HANDLE);
+  Ensures(sQueue != VK_NULL_HANDLE);
 
   LOG_LEAVE();
   return {};
 } // CreateDevice
+
+static tl::expected<void, std::system_error> CreateCommandPool() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+
+  VkCommandPoolCreateInfo commandPoolCI = {};
+  commandPoolCI.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+  commandPoolCI.queueFamilyIndex = sQueueFamilyIndex;
+
+  if (auto result =
+        vkCreateCommandPool(sDevice, &commandPoolCI, nullptr, &sCommandPool);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkCreateCommandPool"));
+  }
+
+  Ensures(sCommandPool != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
+  return {};
+} // CreateCommandPool
+
+static [[nodiscard]] tl::expected<VkCommandBuffer, std::system_error>
+BeginOneTimeSubmit() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sCommandPool != VK_NULL_HANDLE);
+
+  VkCommandBufferAllocateInfo commandBufferAI = {};
+  commandBufferAI.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  commandBufferAI.commandPool = sCommandPool;
+  commandBufferAI.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  commandBufferAI.commandBufferCount = 1;
+
+  VkCommandBuffer commandBuffer;
+  if (auto result =
+        vkAllocateCommandBuffers(sDevice, &commandBufferAI, &commandBuffer);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(vk::make_error_code(result),
+                                            "vkAllocateCommandBuffers"));
+  }
+
+  VkCommandBufferBeginInfo commandBufferBI = {};
+  commandBufferBI.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  commandBufferBI.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+  if (auto result = vkBeginCommandBuffer(commandBuffer, &commandBufferBI);
+      result != VK_SUCCESS) {
+    vkFreeCommandBuffers(sDevice, sCommandPool, 1, &commandBuffer);
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkBeginCommandBuffer"));
+  }
+
+  LOG_LEAVE();
+  return commandBuffer;
+} // BeginOneTimeSubmit
+
+static tl::expected<void, std::system_error>
+EndOneTimeSubmit(VkCommandBuffer commandBuffer) noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sCommandPool != VK_NULL_HANDLE);
+  Expects(sQueue != VK_NULL_HANDLE);
+  Expects(commandBuffer != VK_NULL_HANDLE);
+
+  if (auto result = vkEndCommandBuffer(commandBuffer); result != VK_SUCCESS) {
+    vkFreeCommandBuffers(sDevice, sCommandPool, 1, &commandBuffer);
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkEndCommandBuffer"));
+  }
+
+  VkFenceCreateInfo fenceCI = {};
+  fenceCI.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+
+  VkFence fence;
+  if (auto result = vkCreateFence(sDevice, &fenceCI, nullptr, &fence);
+      result != VK_SUCCESS) {
+    vkFreeCommandBuffers(sDevice, sCommandPool, 1, &commandBuffer);
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkCreateFence"));
+  }
+
+  VkSubmitInfo submitInfo = {};
+  submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submitInfo.commandBufferCount = 1;
+  submitInfo.pCommandBuffers = &commandBuffer;
+
+  if (auto result = vkQueueSubmit(sQueue, 1, &submitInfo, fence);
+      result != VK_SUCCESS) {
+    vkDestroyFence(sDevice, fence, nullptr);
+    vkFreeCommandBuffers(sDevice, sCommandPool, 1, &commandBuffer);
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkQueueSubmit"));
+  }
+
+  if (auto result = vkWaitForFences(sDevice, 1, &fence, VK_TRUE, UINT64_MAX);
+    result != VK_SUCCESS) {
+    vkDestroyFence(sDevice, fence, nullptr);
+    vkFreeCommandBuffers(sDevice, sCommandPool, 1, &commandBuffer);
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkWaitForFences"));
+  }
+
+  vkDestroyFence(sDevice, fence, nullptr);
+  vkFreeCommandBuffers(sDevice, sCommandPool, 1, &commandBuffer);
+
+  LOG_LEAVE();
+  return {};
+} // EndOneTimeSubmit
+
+static tl::expected<void, std::system_error> CreateAllocator() noexcept {
+  LOG_ENTER();
+  Expects(sPhysicalDevice != VK_NULL_HANDLE);
+  Expects(sDevice != VK_NULL_HANDLE);
+
+  VmaAllocatorCreateInfo allocatorCI = {};
+  allocatorCI.flags = VMA_ALLOCATOR_CREATE_KHR_DEDICATED_ALLOCATION_BIT;
+  allocatorCI.physicalDevice = sPhysicalDevice;
+  allocatorCI.device = sDevice;
+
+  if (auto result = vmaCreateAllocator(&allocatorCI, &sAllocator);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaCreateAllocator"));
+  }
+
+  Ensures(sAllocator != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
+  return {};
+} // CreateAllocator
+
+static tl::expected<void, std::system_error> CreateRenderPass() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+
+  VkAttachmentDescription colorAttachmentDescription = {
+    0,                                       // flags
+    sSurfaceColorFormat.format,              // format
+    VK_SAMPLE_COUNT_1_BIT,                   // samples
+    VK_ATTACHMENT_LOAD_OP_CLEAR,             // loadOp (color and depth)
+    VK_ATTACHMENT_STORE_OP_DONT_CARE,        // storeOp (color and depth)
+    VK_ATTACHMENT_LOAD_OP_DONT_CARE,         // stencilLoadOp
+    VK_ATTACHMENT_STORE_OP_DONT_CARE,        // stencilStoreOp
+    VK_IMAGE_LAYOUT_UNDEFINED,               // initialLayout
+    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL // finalLayout
+  };
+
+  VkAttachmentReference color{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+
+  VkSubpassDescription subpassDescription = {
+    0,                               // flags
+    VK_PIPELINE_BIND_POINT_GRAPHICS, // pipelineBindPoint
+    0,                               // inputAttachmentCount
+    nullptr,                         // pInputAttachments
+    1,                               // colorAttachmentCount
+    &color,                          // pColorAttachments (array)
+    nullptr,                         // pResolveAttachments (array)
+    nullptr,                         // pDepthStencilAttachment (single)
+    0,                               // preserveAttachmentCount
+    nullptr                          // pPreserveAttachments
+  };
+
+  std::array<VkSubpassDependency, 2> subpassDependencies = {
+    VkSubpassDependency{
+      VK_SUBPASS_EXTERNAL,                           // srcSubpass
+      0,                                             // dstSubpass
+      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,          // srcStageMask
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, // dstStageMask
+      VK_ACCESS_MEMORY_READ_BIT,                     // srcAccessMask
+      VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, // dstAccessMask
+      VK_DEPENDENCY_BY_REGION_BIT             // dependencyFlags
+    },
+    VkSubpassDependency{
+      0,                                             // srcSubpass
+      VK_SUBPASS_EXTERNAL,                           // dstSubpass
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, // srcStageMask
+      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,          // dstStageMask
+      VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, // srcAccessMask
+      VK_ACCESS_MEMORY_READ_BIT,              // dstAccessMask
+      VK_DEPENDENCY_BY_REGION_BIT             // dependencyFlags
+    }};
+
+  VkRenderPassCreateInfo renderPassCI = {};
+  renderPassCI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+  renderPassCI.attachmentCount = 1;
+  renderPassCI.pAttachments = &colorAttachmentDescription;
+  renderPassCI.subpassCount = 1;
+  renderPassCI.pSubpasses = &subpassDescription;
+  renderPassCI.dependencyCount =
+    gsl::narrow_cast<std::uint32_t>(subpassDependencies.size());
+  renderPassCI.pDependencies = subpassDependencies.data();
+
+  if (auto result =
+        vkCreateRenderPass(sDevice, &renderPassCI, nullptr, &sRenderPass);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkCreateRenderPass"));
+  }
+
+  NameObject(sDevice, VK_OBJECT_TYPE_RENDER_PASS, sRenderPass, "sRenderPass");
+
+  Ensures(sRenderPass != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
+  return {};
+} // CreateRenderPass
 
 static tl::expected<void, std::system_error> CreateSurface() noexcept {
   LOG_ENTER();
   Expects(sWindow != nullptr);
   Expects(sInstance != VK_NULL_HANDLE);
   Expects(sPhysicalDevice != VK_NULL_HANDLE);
+  Expects(sQueueFamilyIndex != UINT32_MAX);
 
   if (auto result =
         glfwCreateWindowSurface(sInstance, sWindow, nullptr, &sSurface);
@@ -549,16 +872,224 @@ static tl::expected<void, std::system_error> CreateSurface() noexcept {
                                             "glfwCreateWindowSurface"));
   }
 
+  NameObject(sDevice, VK_OBJECT_TYPE_SURFACE_KHR, sSurface, "sSurface");
+
+  VkBool32 surfaceSupported = VK_FALSE;
+  if (auto result = vkGetPhysicalDeviceSurfaceSupportKHR(
+        sPhysicalDevice, sQueueFamilyIndex, sSurface, &surfaceSupported);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(
+      vk::make_error_code(result), "vkGetPhysicalDeviceSurfaceSupportKHR"));
+  }
+
   Ensures(sSurface != VK_NULL_HANDLE);
 
   LOG_LEAVE();
   return {};
 } // CreateSurface
 
+static tl::expected<void, std::system_error> VerifySurfaceFormat() noexcept {
+  LOG_ENTER();
+  Expects(sPhysicalDevice != VK_NULL_HANDLE);
+  Expects(sSurface != VK_NULL_HANDLE);
+  Expects(sSurfaceColorFormat.format != VK_FORMAT_UNDEFINED);
+
+  VkPhysicalDeviceSurfaceInfo2KHR surfaceInfo = {};
+  surfaceInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR;
+  surfaceInfo.surface = sSurface;
+
+  std::uint32_t count;
+
+  if (auto result = vkGetPhysicalDeviceSurfaceFormats2KHR(
+        sPhysicalDevice, &surfaceInfo, &count, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(
+      vk::make_error_code(result), "vkGetPhysicalDeviceSurfaceFormats2KHR"));
+  }
+
+  std::vector<VkSurfaceFormat2KHR> formats(count);
+  for (auto& format : formats) {
+    format.sType = VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR;
+    format.pNext = nullptr;
+  }
+
+  if (auto result = vkGetPhysicalDeviceSurfaceFormats2KHR(
+        sPhysicalDevice, &surfaceInfo, &count, formats.data());
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(
+      vk::make_error_code(result), "vkGetPhysicalDeviceSurfaceFormats2KHR"));
+  }
+
+  if (formats.size() == 1 &&
+      formats[0].surfaceFormat.format == VK_FORMAT_UNDEFINED) {
+    LOG_LEAVE();
+    return {};
+  }
+
+  for (auto&& format : formats) {
+    if (format.surfaceFormat.format == sSurfaceColorFormat.format &&
+        format.surfaceFormat.colorSpace == sSurfaceColorFormat.colorSpace) {
+      LOG_LEAVE();
+      return {};
+    }
+  }
+
+  LOG_LEAVE();
+  return tl::unexpected(std::system_error(
+    vk::make_error_code(vk::VulkanResult::kErrorFormatNotSupported)));
+} // VerifySurfaceFormat
+
+static tl::expected<void, std::system_error> CreateFrames() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sSurface != VK_NULL_HANDLE);
+
+  VkPhysicalDeviceSurfaceInfo2KHR surfaceInfo = {};
+  surfaceInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR;
+  surfaceInfo.surface = sSurface;
+
+  VkSurfaceCapabilities2KHR surfaceCapabilities = {};
+  surfaceCapabilities.sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR;
+
+  if (auto result = vkGetPhysicalDeviceSurfaceCapabilities2KHR(
+        sPhysicalDevice, &surfaceInfo, &surfaceCapabilities);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result),
+                        "vkGetPhysicalDeviceSurfaceCapabilities2KHR"));
+  }
+
+  std::uint32_t imageCount =
+    glm::clamp(surfaceCapabilities.surfaceCapabilities.minImageCount + 1,
+               surfaceCapabilities.surfaceCapabilities.minImageCount,
+               surfaceCapabilities.surfaceCapabilities.maxImageCount);
+
+  sFrames.resize(imageCount);
+
+  VkSemaphoreCreateInfo semaphoreCI = {};
+  semaphoreCI.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+  VkCommandPoolCreateInfo commandPoolCI = {};
+  commandPoolCI.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+  commandPoolCI.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+  commandPoolCI.queueFamilyIndex = sQueueFamilyIndex;
+
+  VkCommandBufferAllocateInfo commandBufferAI = {};
+  commandBufferAI.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  commandBufferAI.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  commandBufferAI.commandBufferCount = 1;
+
+  for (auto& frame : sFrames) {
+    if (auto result = vkCreateSemaphore(sDevice, &semaphoreCI, nullptr,
+                                        &frame.imageAvailable);
+        result != VK_SUCCESS) {
+      LOG_LEAVE();
+      return tl::unexpected(
+        std::system_error(vk::make_error_code(result), "vkCreateSemaphore"));
+    }
+
+    if (auto result = vkCreateCommandPool(sDevice, &commandPoolCI, nullptr,
+                                          &frame.commandPool);
+        result != VK_SUCCESS) {
+      LOG_LEAVE();
+      return tl::unexpected(
+        std::system_error(vk::make_error_code(result), "vkCreateCommandPool"));
+    }
+
+    commandBufferAI.commandPool = frame.commandPool;
+
+    if (auto result = vkAllocateCommandBuffers(sDevice, &commandBufferAI,
+                                               &frame.commandBuffer);
+        result != VK_SUCCESS) {
+      LOG_LEAVE();
+      return tl::unexpected(std::system_error(vk::make_error_code(result),
+                                              "vkAllocateCommandBuffers"));
+    }
+
+    Ensures(frame.imageAvailable != VK_NULL_HANDLE);
+    Ensures(frame.commandPool != VK_NULL_HANDLE);
+    Ensures(frame.commandBuffer != VK_NULL_HANDLE);
+
+    NameObject(sDevice, VK_OBJECT_TYPE_SEMAPHORE, frame.imageAvailable,
+               "sFrames.imageAvailable");
+    NameObject(sDevice, VK_OBJECT_TYPE_COMMAND_POOL, frame.commandPool,
+               "sFrames.commandPool");
+    NameObject(sDevice, VK_OBJECT_TYPE_COMMAND_BUFFER, frame.commandBuffer,
+               "sFrames.commandBuffer");
+  }
+
+  LOG_LEAVE();
+  return {};
+} // CreateFrames
+
 static tl::expected<void, std::system_error> CreateSwapchain() noexcept {
   LOG_ENTER();
   Expects(sDevice != VK_NULL_HANDLE);
   Expects(sSurface != VK_NULL_HANDLE);
+
+  VkPhysicalDeviceSurfaceInfo2KHR surfaceInfo = {};
+  surfaceInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR;
+  surfaceInfo.surface = sSurface;
+
+  VkSurfaceCapabilities2KHR surfaceCapabilities = {};
+  surfaceCapabilities.sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR;
+
+  if (auto result = vkGetPhysicalDeviceSurfaceCapabilities2KHR(
+        sPhysicalDevice, &surfaceInfo, &surfaceCapabilities);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result),
+                        "vkGetPhysicalDeviceSurfaceCapabilities2KHR"));
+  }
+
+  int width, height;
+  glfwGetFramebufferSize(sWindow, &width, &height);
+
+  sSwapchainExtent.width =
+    surfaceCapabilities.surfaceCapabilities.currentExtent.width == UINT32_MAX
+      ? glm::clamp(gsl::narrow_cast<std::uint32_t>(width),
+                   surfaceCapabilities.surfaceCapabilities.minImageExtent.width,
+                   surfaceCapabilities.surfaceCapabilities.maxImageExtent.width)
+      : surfaceCapabilities.surfaceCapabilities.currentExtent.width;
+
+  sSwapchainExtent.height =
+    surfaceCapabilities.surfaceCapabilities.currentExtent.height == UINT32_MAX
+      ? glm::clamp(
+          gsl::narrow_cast<std::uint32_t>(height),
+          surfaceCapabilities.surfaceCapabilities.minImageExtent.height,
+          surfaceCapabilities.surfaceCapabilities.maxImageExtent.height)
+      : surfaceCapabilities.surfaceCapabilities.currentExtent.height;
+
+  VkSwapchainCreateInfoKHR swapchainCI = {};
+  swapchainCI.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+  swapchainCI.surface = sSurface;
+  swapchainCI.minImageCount = gsl::narrow_cast<std::uint32_t>(sFrames.size());
+  swapchainCI.imageFormat = sSurfaceColorFormat.format;
+  swapchainCI.imageColorSpace = sSurfaceColorFormat.colorSpace;
+  swapchainCI.imageExtent = sSwapchainExtent;
+  swapchainCI.imageArrayLayers = 1;
+  swapchainCI.imageUsage =
+    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  swapchainCI.preTransform =
+    surfaceCapabilities.surfaceCapabilities.currentTransform;
+  swapchainCI.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+  swapchainCI.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+  swapchainCI.clipped = VK_TRUE;
+
+  if (auto result =
+        vkCreateSwapchainKHR(sDevice, &swapchainCI, nullptr, &sSwapchain);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkCreateSwapchainKHR"));
+  }
+
+  NameObject(sDevice, VK_OBJECT_TYPE_SWAPCHAIN_KHR, sSwapchain, "sSwapchain");
 
   Ensures(sSwapchain != VK_NULL_HANDLE);
 
@@ -566,25 +1097,1309 @@ static tl::expected<void, std::system_error> CreateSwapchain() noexcept {
   return {};
 } // CreateSwapchain
 
+static tl::expected<void, std::system_error>
+CreateSwapchainImagesAndViews() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sSwapchain != VK_NULL_HANDLE);
+
+  std::uint32_t count;
+
+  if (auto result =
+        vkGetSwapchainImagesKHR(sDevice, sSwapchain, &count, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(vk::make_error_code(result),
+                                            "vkGetSwapchainImagesKHR"));
+  }
+
+  sSwapchainImages.resize(count);
+
+  if (auto result = vkGetSwapchainImagesKHR(sDevice, sSwapchain, &count,
+                                            sSwapchainImages.data());
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(vk::make_error_code(result),
+                                            "vkGetSwapchainImagesKHR"));
+  }
+
+  VkImageViewCreateInfo imageViewCI = {};
+  imageViewCI.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+  imageViewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  imageViewCI.format = sSurfaceColorFormat.format;
+  imageViewCI.components = {
+    VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+    VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+  imageViewCI.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+  sSwapchainImageViews.resize(count);
+  for (std::size_t i = 0; i < sSwapchainImageViews.size(); ++i) {
+    imageViewCI.image = sSwapchainImages[i];
+
+    if (auto result = vkCreateImageView(sDevice, &imageViewCI, nullptr,
+                                        &sSwapchainImageViews[i]);
+        result != VK_SUCCESS) {
+      return tl::unexpected(
+        std::system_error(vk::make_error_code(result), "vkCreateImageView"));
+    }
+
+    NameObject(sDevice, VK_OBJECT_TYPE_IMAGE_VIEW, sSwapchainImageViews[i],
+               "sSwapchainImageViews");
+  }
+
+  for (std::size_t i = 0; i < sSwapchainImageViews.size(); ++i) {
+    Ensures(sSwapchainImageViews[i] != VK_NULL_HANDLE);
+  }
+
+  Ensures(!sSwapchainImages.empty());
+
+  LOG_LEAVE();
+  return {};
+} // CreateSwapchainImagesAndViews
+
+static tl::expected<void, std::system_error> CreateFramebuffers() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sRenderPass != VK_NULL_HANDLE);
+  Expects(!sSwapchainImageViews.empty());
+  Expects(sSwapchainImageViews.size() == sFrames.size());
+
+  VkFramebufferCreateInfo framebufferCI = {};
+  framebufferCI.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+  framebufferCI.renderPass = sRenderPass;
+  framebufferCI.attachmentCount = 1;
+  framebufferCI.width = sSwapchainExtent.width;
+  framebufferCI.height = sSwapchainExtent.height;
+  framebufferCI.layers = 1;
+
+  for (std::size_t i = 0; i < sSwapchainImageViews.size(); ++i) {
+    framebufferCI.pAttachments = &sSwapchainImageViews[i];
+
+    if (auto result = vkCreateFramebuffer(sDevice, &framebufferCI, nullptr,
+                                          &sFrames[i].framebuffer);
+        result != VK_SUCCESS) {
+      LOG_LEAVE();
+      return tl::unexpected(
+        std::system_error(vk::make_error_code(result), "vkCreateFramebuffer"));
+    }
+  }
+
+  for (auto&& frame : sFrames) {
+    Ensures(frame.framebuffer != VK_NULL_HANDLE);
+    NameObject(sDevice, VK_OBJECT_TYPE_FRAMEBUFFER, frame.framebuffer,
+               "sFrames.framebuffer");
+  }
+
+  LOG_LEAVE();
+  return {};
+} // CreateFramebuffers
+
+static tl::expected<void, std::system_error> CreateDescriptorPool() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+
+  std::array<VkDescriptorPoolSize, 3> poolSizes = {
+    VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_NV, 1},
+    VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
+    VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}};
+
+  VkDescriptorPoolCreateInfo descriptorPoolCI = {};
+  descriptorPoolCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+  descriptorPoolCI.poolSizeCount =
+    gsl::narrow_cast<std::uint32_t>(poolSizes.size());
+  descriptorPoolCI.pPoolSizes = poolSizes.data();
+  descriptorPoolCI.maxSets = 1;
+
+  if (auto result = vkCreateDescriptorPool(sDevice, &descriptorPoolCI, nullptr,
+                                           &sDescriptorPool);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkCreateDescriptorPool"));
+  }
+
+  NameObject(sDevice, VK_OBJECT_TYPE_DESCRIPTOR_POOL, sDescriptorPool,
+             "sDescriptorPool");
+
+  Ensures(sDescriptorPool != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
+  return {};
+} // CreateDescriptorPool
+
+static tl::expected<void, std::system_error>
+CreateDescriptorSetLayout() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+
+  VkDescriptorSetLayoutBinding accelerationStructureLB = {};
+  accelerationStructureLB.binding = 0;
+  accelerationStructureLB.descriptorCount = 1;
+  accelerationStructureLB.descriptorType =
+    VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_NV;
+  accelerationStructureLB.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_NV;
+
+  VkDescriptorSetLayoutBinding outputImageLB = {};
+  outputImageLB.binding = 1;
+  outputImageLB.descriptorCount = 1;
+  outputImageLB.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+  outputImageLB.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_NV;
+
+  VkDescriptorSetLayoutBinding uniformBufferLB = {};
+  uniformBufferLB.binding = 2;
+  uniformBufferLB.descriptorCount = 1;
+  uniformBufferLB.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  outputImageLB.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_NV;
+
+  std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+    accelerationStructureLB, outputImageLB, uniformBufferLB};
+
+  VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCI = {};
+  descriptorSetLayoutCI.sType =
+    VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  descriptorSetLayoutCI.bindingCount =
+    gsl::narrow_cast<std::uint32_t>(bindings.size());
+  descriptorSetLayoutCI.pBindings = bindings.data();
+
+  if (auto result = vkCreateDescriptorSetLayout(sDevice, &descriptorSetLayoutCI,
+                                                nullptr, &sDescriptorSetLayout);
+      result != VK_SUCCESS) {
+    return tl::unexpected(std::system_error(vk::make_error_code(result),
+                                            "vkCreateDescriptorSetLayout"));
+  }
+
+  NameObject(sDevice, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+             sDescriptorSetLayout, "sDescriptorSetLayout");
+
+  Ensures(sDescriptorSetLayout != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
+  return {};
+} // CreateDescriptorSetLayout
+
+static [[nodiscard]] tl::expected<VkShaderModule, std::system_error>
+CreateShaderModule(gsl::czstring filename) noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+
+  std::unique_ptr<std::FILE, decltype(&std::fclose)> fh(
+    std::fopen(filename, "rb"), std::fclose);
+
+  if (!fh) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(std::make_error_code(std::errc::io_error), filename));
+  }
+
+  std::fseek(fh.get(), 0L, SEEK_END);
+  std::vector<std::byte> code(std::ftell(fh.get()));
+  std::fseek(fh.get(), 0L, SEEK_SET);
+
+  std::size_t nread =
+    std::fread(code.data(), sizeof(std::byte), std::size(code), fh.get());
+
+  if (std::ferror(fh.get()) && !std::feof(fh.get()) ||
+      nread != std::size(code)) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(std::make_error_code(std::errc::io_error), filename));
+  }
+
+  VkShaderModuleCreateInfo shaderModuleCI = {};
+  shaderModuleCI.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  shaderModuleCI.codeSize = code.size();
+  shaderModuleCI.pCode = reinterpret_cast<std::uint32_t*>(code.data());
+
+  VkShaderModule shaderModule;
+  if (auto result =
+        vkCreateShaderModule(sDevice, &shaderModuleCI, nullptr, &shaderModule);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkCreateShaderModule"));
+  }
+
+  LOG_LEAVE();
+  return shaderModule;
+} // CreateShaderModule
+
+static tl::expected<void, std::system_error> CreatePipeline() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sDescriptorSetLayout != VK_NULL_HANDLE);
+
+  VkPipelineLayoutCreateInfo pipelineLayoutCI = {};
+  pipelineLayoutCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  pipelineLayoutCI.setLayoutCount = 1;
+  pipelineLayoutCI.pSetLayouts = &sDescriptorSetLayout;
+
+  if (auto result = vkCreatePipelineLayout(sDevice, &pipelineLayoutCI, nullptr,
+                                           &sPipelineLayout);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vKCreatePipelineLayout"));
+  }
+
+  auto rgenSM = CreateShaderModule("01_sphere_rgen.spv");
+  if (!rgenSM) {
+    LOG_LEAVE();
+    return tl::unexpected(rgenSM.error());
+  }
+
+  auto rmissSM = CreateShaderModule("01_sphere_rmiss.spv");
+  if (!rmissSM) {
+    LOG_LEAVE();
+    return tl::unexpected(rmissSM.error());
+  }
+
+  auto rchitSM = CreateShaderModule("01_sphere_rchit.spv");
+  if (!rchitSM) {
+    LOG_LEAVE();
+    return tl::unexpected(rchitSM.error());
+  }
+
+  auto rintSM = CreateShaderModule("01_sphere_rint.spv");
+  if (!rintSM) {
+    LOG_LEAVE();
+    return tl::unexpected(rintSM.error());
+  }
+
+  std::array<VkPipelineShaderStageCreateInfo, 4> stages = {
+    VkPipelineShaderStageCreateInfo{
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+      VK_SHADER_STAGE_RAYGEN_BIT_NV, *rgenSM, "main", nullptr},
+    VkPipelineShaderStageCreateInfo{
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+      VK_SHADER_STAGE_MISS_BIT_NV, *rmissSM, "main", nullptr},
+    VkPipelineShaderStageCreateInfo{
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+      VK_SHADER_STAGE_CLOSEST_HIT_BIT_NV, *rchitSM, "main", nullptr},
+    VkPipelineShaderStageCreateInfo{
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+      VK_SHADER_STAGE_INTERSECTION_BIT_NV, *rintSM, "main", nullptr}};
+
+  std::array<VkRayTracingShaderGroupCreateInfoNV, 3> groups = {
+    VkRayTracingShaderGroupCreateInfoNV{
+      VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_NV, nullptr,
+      VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_NV, 0, 0, 0, 0},
+    VkRayTracingShaderGroupCreateInfoNV{
+      VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_NV, nullptr,
+      VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_NV, 1, 0, 0, 0},
+    VkRayTracingShaderGroupCreateInfoNV{
+      VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_NV, nullptr,
+      VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_NV, 0, 2, 0, 3}};
+
+  VkRayTracingPipelineCreateInfoNV pipelineCI = {};
+  pipelineCI.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_NV;
+  pipelineCI.stageCount = gsl::narrow_cast<std::uint32_t>(stages.size());
+  pipelineCI.pStages = stages.data();
+  pipelineCI.groupCount = gsl::narrow_cast<std::uint32_t>(groups.size());
+  pipelineCI.pGroups = groups.data();
+  pipelineCI.maxRecursionDepth = 1;
+  pipelineCI.layout = sPipelineLayout;
+
+  if (auto result = vkCreateRayTracingPipelinesNV(
+        sDevice, VK_NULL_HANDLE, 1, &pipelineCI, nullptr, &sPipeline);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(vk::make_error_code(result),
+                                            "vkCreateRayTracingPipelinesNV"));
+  }
+
+  NameObject(sDevice, VK_OBJECT_TYPE_PIPELINE_LAYOUT, sPipelineLayout,
+             "sPipelineLayout");
+  NameObject(sDevice, VK_OBJECT_TYPE_PIPELINE, sPipeline, "sPipeline");
+
+  Ensures(sPipelineLayout != VK_NULL_HANDLE);
+  Ensures(sPipeline != VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(sDevice, *rgenSM, nullptr);
+  vkDestroyShaderModule(sDevice, *rmissSM, nullptr);
+  vkDestroyShaderModule(sDevice, *rchitSM, nullptr);
+  vkDestroyShaderModule(sDevice, *rintSM, nullptr);
+
+  LOG_LEAVE();
+  return {};
+} // CreatePipeline
+
+static tl::expected<void, std::system_error> CreateUniformBuffer() noexcept {
+  LOG_ENTER();
+  Expects(sAllocator != VK_NULL_HANDLE);
+
+  char objectName[] = "sUniformBuffer";
+
+  VkBufferCreateInfo bufferCI = {};
+  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferCI.size = sizeof(UniformBuffer);
+  bufferCI.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+  VmaAllocationCreateInfo allocationCI = {};
+  allocationCI.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
+  allocationCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+  allocationCI.pUserData = objectName;
+
+  if (auto result =
+        vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI, &sUniformBuffer,
+                        &sUniformBufferAllocation, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
+  }
+
+  Ensures(sUniformBuffer != VK_NULL_HANDLE);
+  Ensures(sUniformBufferAllocation != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
+  return {};
+} // CreateUniformBuffer
+
+static tl::expected<void, std::system_error> CreateOutputImage() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sAllocator != VK_NULL_HANDLE);
+  Expects(sSwapchain != VK_NULL_HANDLE); // Ensures sSwapchainExtent is valid
+
+  char objectName[] = "sOutputImage";
+
+  VkImageCreateInfo imageCI = {};
+  imageCI.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+  imageCI.imageType = VK_IMAGE_TYPE_2D;
+  imageCI.format = sSurfaceColorFormat.format;
+  imageCI.extent = {sSwapchainExtent.width, sSwapchainExtent.height, 1};
+  imageCI.mipLevels = 1;
+  imageCI.arrayLayers = 1;
+  imageCI.samples = VK_SAMPLE_COUNT_1_BIT;
+  imageCI.tiling = VK_IMAGE_TILING_OPTIMAL;
+  imageCI.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  imageCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+  VmaAllocationCreateInfo allocationCI = {};
+  allocationCI.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
+  allocationCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+  allocationCI.pUserData = objectName;
+
+  if (auto result =
+        vmaCreateImage(sAllocator, &imageCI, &allocationCI, &sOutputImage,
+                       &sOutputImageAllocation, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaCreateImage"));
+  }
+
+  VkImageViewCreateInfo imageViewCI = {};
+  imageViewCI.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+  imageViewCI.image = sOutputImage;
+  imageViewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  imageViewCI.format = sSurfaceColorFormat.format;
+  imageViewCI.components = {
+    VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+    VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+  imageViewCI.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+  if (auto result =
+        vkCreateImageView(sDevice, &imageViewCI, nullptr, &sOutputImageView);
+      result != VK_NULL_HANDLE) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkCreateImageView"));
+  }
+
+  Ensures(sOutputImage != VK_NULL_HANDLE);
+  Ensures(sOutputImageAllocation != VK_NULL_HANDLE);
+  Ensures(sOutputImageView != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
+  return {};
+} // CreateOutputImage
+
+static tl::expected<void, std::system_error>
+CreateBottomLevelAccelerationStructures() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sAllocator != VK_NULL_HANDLE);
+
+  VkBuffer aabbBuffer;
+  VmaAllocation aabbBufferAllocation;
+
+  VkBufferCreateInfo bufferCI = {};
+  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferCI.size = 24; // 6 32 bit floats == 6 x 4 bytes == 24 bytes
+  bufferCI.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+  VmaAllocationCreateInfo allocationCI = {};
+  allocationCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+
+  if (auto result =
+        vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI, &aabbBuffer,
+                        &aabbBufferAllocation, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
+  }
+
+  void* aabbRaw;
+  if (auto result = vmaMapMemory(sAllocator, aabbBufferAllocation, &aabbRaw);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaMapMemory"));
+  }
+
+  float* aabbData = reinterpret_cast<float*>(aabbRaw);
+  aabbData[0] = aabbData[1] = aabbData[2] = -1.f; // min
+  aabbData[3] = aabbData[4] = aabbData[5] = 1.f;  // max
+
+  vmaUnmapMemory(sAllocator, aabbBufferAllocation);
+
+  VkGeometryNV geometry = {};
+  geometry.sType = VK_STRUCTURE_TYPE_GEOMETRY_NV;
+  geometry.geometryType = VK_GEOMETRY_TYPE_AABBS_NV;
+  geometry.flags = VK_GEOMETRY_OPAQUE_BIT_NV;
+
+  // I think I see how the validation layers are reading the spec to require
+  // this, but I disagree that its the right interpretation of the spec.
+  geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_GEOMETRY_TRIANGLES_NV;
+
+  geometry.geometry.aabbs.sType = VK_STRUCTURE_TYPE_GEOMETRY_AABB_NV;
+  geometry.geometry.aabbs.aabbData = aabbBuffer;
+  geometry.geometry.aabbs.numAABBs = 1;
+  geometry.geometry.aabbs.stride = 24;
+  geometry.geometry.aabbs.offset = 0;
+
+  VkAccelerationStructureCreateInfoNV accelerationStructureCI = {};
+  accelerationStructureCI.sType =
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_NV;
+  accelerationStructureCI.compactedSize = 0;
+  accelerationStructureCI.info.sType =
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_INFO_NV;
+  accelerationStructureCI.info.type =
+    VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_NV;
+  accelerationStructureCI.info.flags = 0;
+  accelerationStructureCI.info.instanceCount = 0;
+  accelerationStructureCI.info.geometryCount = 1;
+  accelerationStructureCI.info.pGeometries = &geometry;
+
+  if (auto result = vkCreateAccelerationStructureNV(
+        sDevice, &accelerationStructureCI, nullptr,
+        &sBottomLevelAccelerationStructure);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(vk::make_error_code(result),
+                                            "vkCreateAccelerationStructureNV"));
+  }
+
+  NameObject(sDevice, VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_NV,
+             sBottomLevelAccelerationStructure,
+             "sBottomLevelAccelerationStructure");
+
+  VkAccelerationStructureMemoryRequirementsInfoNV memReqInfo = {};
+  memReqInfo.sType =
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_MEMORY_REQUIREMENTS_INFO_NV;
+  memReqInfo.accelerationStructure = sBottomLevelAccelerationStructure;
+  memReqInfo.type =
+    VK_ACCELERATION_STRUCTURE_MEMORY_REQUIREMENTS_TYPE_OBJECT_NV;
+
+  VkMemoryRequirements2 memReq = {};
+  memReq.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+
+  vkGetAccelerationStructureMemoryRequirementsNV(sDevice, &memReqInfo, &memReq);
+
+  char objectName[] = "sBottomLevelAccelerationStructureAllocation";
+
+  allocationCI = {};
+  allocationCI.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
+  allocationCI.usage = VMA_MEMORY_USAGE_UNKNOWN;
+  allocationCI.pUserData = objectName;
+
+  if (auto result = vmaAllocateMemory(
+        sAllocator, &memReq.memoryRequirements, &allocationCI,
+        &sBottomLevelAccelerationStructureAllocation, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaAllocateMemory"));
+  }
+
+  VmaAllocationInfo info;
+  vmaGetAllocationInfo(sAllocator, sBottomLevelAccelerationStructureAllocation,
+                       &info);
+
+  VkBindAccelerationStructureMemoryInfoNV bindInfo = {};
+  bindInfo.sType = VK_STRUCTURE_TYPE_BIND_ACCELERATION_STRUCTURE_MEMORY_INFO_NV;
+  bindInfo.accelerationStructure = sBottomLevelAccelerationStructure;
+  bindInfo.memory = info.deviceMemory;
+  bindInfo.memoryOffset = info.offset;
+
+  if (auto result = vkBindAccelerationStructureMemoryNV(sDevice, 1, &bindInfo);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(
+      vk::make_error_code(result), "vkBindAccelerationStructureMemoryNV"));
+  }
+
+  vmaDestroyBuffer(sAllocator, aabbBuffer, aabbBufferAllocation);
+
+  Ensures(sBottomLevelAccelerationStructure != VK_NULL_HANDLE);
+  Ensures(sBottomLevelAccelerationStructureAllocation != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
+  return {};
+} // CreateBottomLevelAccelerationStructures
+
+static tl::expected<void, std::system_error>
+CreateTopLevelAccelerationStructure() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sAllocator != VK_NULL_HANDLE);
+
+  VkAccelerationStructureCreateInfoNV accelerationStructureCI = {};
+  accelerationStructureCI.sType =
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_NV;
+  accelerationStructureCI.compactedSize = 0;
+  accelerationStructureCI.info.sType =
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_INFO_NV;
+  accelerationStructureCI.info.type =
+    VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_NV;
+  accelerationStructureCI.info.flags = 0;
+  accelerationStructureCI.info.instanceCount = 1;
+  accelerationStructureCI.info.geometryCount = 0;
+
+  if (auto result = vkCreateAccelerationStructureNV(
+        sDevice, &accelerationStructureCI, nullptr,
+        &sTopLevelAccelerationStructure);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(vk::make_error_code(result),
+                                            "vkCreateAccelerationStructureNV"));
+  }
+
+  NameObject(sDevice, VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_NV,
+             sTopLevelAccelerationStructure, "sTopLevelAccelerationStructure");
+
+  VkAccelerationStructureMemoryRequirementsInfoNV memReqInfo = {};
+  memReqInfo.sType =
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_MEMORY_REQUIREMENTS_INFO_NV;
+  memReqInfo.accelerationStructure = sTopLevelAccelerationStructure;
+  memReqInfo.type =
+    VK_ACCELERATION_STRUCTURE_MEMORY_REQUIREMENTS_TYPE_OBJECT_NV;
+
+  VkMemoryRequirements2 memReq = {};
+  memReq.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+
+  vkGetAccelerationStructureMemoryRequirementsNV(sDevice, &memReqInfo, &memReq);
+
+  char objectName[] = "sTopLevelAccelerationStructureAllocation";
+
+  VmaAllocationCreateInfo allocationCI = {};
+  allocationCI.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
+  allocationCI.usage = VMA_MEMORY_USAGE_UNKNOWN;
+  allocationCI.pUserData = objectName;
+
+  if (auto result =
+        vmaAllocateMemory(sAllocator, &memReq.memoryRequirements, &allocationCI,
+                          &sTopLevelAccelerationStructureAllocation, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaAllocateMemory"));
+  }
+
+  VmaAllocationInfo info;
+  vmaGetAllocationInfo(sAllocator, sTopLevelAccelerationStructureAllocation,
+                       &info);
+
+  VkBindAccelerationStructureMemoryInfoNV bindInfo = {};
+  bindInfo.sType = VK_STRUCTURE_TYPE_BIND_ACCELERATION_STRUCTURE_MEMORY_INFO_NV;
+  bindInfo.accelerationStructure = sTopLevelAccelerationStructure;
+  bindInfo.memory = info.deviceMemory;
+  bindInfo.memoryOffset = info.offset;
+
+  if (auto result = vkBindAccelerationStructureMemoryNV(sDevice, 1, &bindInfo);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(
+      vk::make_error_code(result), "vkBindAccelerationStructureMemoryNV"));
+  }
+
+  Ensures(sTopLevelAccelerationStructure != VK_NULL_HANDLE);
+  Ensures(sTopLevelAccelerationStructureAllocation != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
+  return {};
+} // CreateTopLevelAccelerationStructure
+
+static tl::expected<void, std::system_error> BuildAccelerationStructures() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sAllocator != VK_NULL_HANDLE);
+  Expects(sBottomLevelAccelerationStructure != VK_NULL_HANDLE);
+  Expects(sTopLevelAccelerationStructure != VK_NULL_HANDLE);
+
+  VkBuffer aabbBuffer;
+  VmaAllocation aabbBufferAllocation;
+
+  VkBufferCreateInfo bufferCI = {};
+  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferCI.size = 24; // 6 32 bit floats == 6 x 4 bytes == 24 bytes
+  bufferCI.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+  VmaAllocationCreateInfo allocationCI = {};
+  allocationCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+
+  if (auto result =
+        vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI, &aabbBuffer,
+                        &aabbBufferAllocation, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
+  }
+
+  void* aabbRaw;
+  if (auto result = vmaMapMemory(sAllocator, aabbBufferAllocation, &aabbRaw);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaMapMemory"));
+  }
+
+  float* aabbData = reinterpret_cast<float*>(aabbRaw);
+  aabbData[0] = aabbData[1] = aabbData[2] = -1.f; // min
+  aabbData[3] = aabbData[4] = aabbData[5] = 1.f;  // max
+
+  vmaUnmapMemory(sAllocator, aabbBufferAllocation);
+
+  VkGeometryNV geometry = {};
+  geometry.sType = VK_STRUCTURE_TYPE_GEOMETRY_NV;
+  geometry.geometryType = VK_GEOMETRY_TYPE_AABBS_NV;
+  geometry.flags = VK_GEOMETRY_OPAQUE_BIT_NV;
+
+  // I think I see how the validation layers are reading the spec to require
+  // this, but I disagree that its the right interpretation of the spec.
+  geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_GEOMETRY_TRIANGLES_NV;
+
+  geometry.geometry.aabbs.sType = VK_STRUCTURE_TYPE_GEOMETRY_AABB_NV;
+  geometry.geometry.aabbs.aabbData = aabbBuffer;
+  geometry.geometry.aabbs.numAABBs = 1;
+  geometry.geometry.aabbs.stride = 24;
+  geometry.geometry.aabbs.offset = 0;
+
+  VkAccelerationStructureInfoNV bottomLevelASInfo = {};
+  bottomLevelASInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_INFO_NV;
+  bottomLevelASInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_NV;
+  bottomLevelASInfo.flags = 0;
+  bottomLevelASInfo.instanceCount = 0;
+  bottomLevelASInfo.geometryCount = 1;
+  bottomLevelASInfo.pGeometries = &geometry;
+
+  VkAccelerationStructureInfoNV topLevelASInfo = {};
+  topLevelASInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_INFO_NV;
+  topLevelASInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_NV;
+  topLevelASInfo.flags = 0;
+  topLevelASInfo.instanceCount = 1;
+  topLevelASInfo.geometryCount = 0;
+
+  std::array<std::byte, 8> bottomLevelHandle;
+  if (auto result = vkGetAccelerationStructureHandleNV(
+        sDevice, sBottomLevelAccelerationStructure, bottomLevelHandle.size(),
+        bottomLevelHandle.data());
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(
+      vk::make_error_code(result), "vkGetAccelerationStructureHandleNV"));
+  }
+
+  VkBuffer instanceBuffer;
+  VmaAllocation instanceAllocation;
+
+  bufferCI = {};
+  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferCI.size = 64;
+  bufferCI.usage = VK_BUFFER_USAGE_RAY_TRACING_BIT_NV;
+
+  allocationCI = {};
+  allocationCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+
+  if (auto result =
+        vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI, &instanceBuffer,
+                        &instanceAllocation, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
+  }
+
+  struct Instance {
+    float transform[12];
+    std::uint32_t instanceCustomIndex : 24;
+    std::uint32_t mask : 8;
+    std::uint32_t instanceOffset : 24;
+    std::uint32_t flags : 8;
+    std::uint64_t accelerationStructureHandle;
+  };
+
+  void* instanceRaw;
+  if (auto result = vmaMapMemory(sAllocator, instanceAllocation, &instanceRaw);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaMapMemory"));
+  }
+
+  Instance* instanceData = reinterpret_cast<Instance*>(instanceRaw);
+  std::memset(instanceData, sizeof(Instance), 0);
+  instanceData->mask = 0xF;
+  instanceData->accelerationStructureHandle =
+    *reinterpret_cast<std::uint64_t*>(bottomLevelHandle.data());
+
+  vmaUnmapMemory(sAllocator, instanceAllocation);
+
+  VkAccelerationStructureMemoryRequirementsInfoNV memReqInfo = {};
+  memReqInfo.sType =
+    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_MEMORY_REQUIREMENTS_INFO_NV;
+  memReqInfo.type =
+    VK_ACCELERATION_STRUCTURE_MEMORY_REQUIREMENTS_TYPE_BUILD_SCRATCH_NV;
+
+  VkMemoryRequirements2 bottomLevelMemReq = {};
+  bottomLevelMemReq.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+
+  memReqInfo.accelerationStructure = sBottomLevelAccelerationStructure;
+  vkGetAccelerationStructureMemoryRequirementsNV(sDevice, &memReqInfo,
+                                                 &bottomLevelMemReq);
+
+  VkMemoryRequirements2 topLevelMemReq = {};
+  topLevelMemReq.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+
+  memReqInfo.accelerationStructure = sTopLevelAccelerationStructure;
+  vkGetAccelerationStructureMemoryRequirementsNV(sDevice, &memReqInfo,
+                                                 &topLevelMemReq);
+
+  VkBuffer scratchBuffer;
+  VmaAllocation scratchAllocation;
+
+  bufferCI = {};
+  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferCI.size = bottomLevelMemReq.memoryRequirements.size +
+                  topLevelMemReq.memoryRequirements.size;
+  bufferCI.usage = VK_BUFFER_USAGE_RAY_TRACING_BIT_NV;
+
+  allocationCI = {};
+  allocationCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+  if (auto result =
+        vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI, &scratchBuffer,
+                        &scratchAllocation, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
+  }
+
+  auto commandBuffer = BeginOneTimeSubmit();
+  if (!commandBuffer) {
+    LOG_LEAVE();
+    return tl::unexpected(commandBuffer.error());
+  }
+
+  vkCmdBuildAccelerationStructureNV(
+    *commandBuffer, &bottomLevelASInfo, VK_NULL_HANDLE /* instanceData */,
+    0 /* instanceOffset */, VK_FALSE /* update */,
+    sBottomLevelAccelerationStructure /* dst */, VK_NULL_HANDLE /* src */,
+    scratchBuffer, 0 /* scratchOffset */);
+
+  vkCmdBuildAccelerationStructureNV(
+    *commandBuffer, &topLevelASInfo, instanceBuffer /* instanceData */,
+    0 /* instanceOffset */, VK_FALSE /* update */,
+    sTopLevelAccelerationStructure /* dst */, VK_NULL_HANDLE /* src */,
+    scratchBuffer,
+    bottomLevelMemReq.memoryRequirements.size /* scratchOffset */);
+
+  if (auto result = EndOneTimeSubmit(*commandBuffer); !result) {
+    LOG_LEAVE();
+    return tl::unexpected(result.error());
+  }
+
+  LOG_LEAVE();
+  return {};
+} // BuildAccelerationStructures
+
+static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sPipeline != VK_NULL_HANDLE);
+  Expects(sAllocator != VK_NULL_HANDLE);
+  Expects(sBottomLevelAccelerationStructure != VK_NULL_HANDLE);
+  Expects(sTopLevelAccelerationStructure != VK_NULL_HANDLE);
+
+  VkPhysicalDeviceRayTracingPropertiesNV rtProps = {};
+  rtProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PROPERTIES_NV;
+
+  VkPhysicalDeviceProperties2 props = {};
+  props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  props.pNext = &rtProps;
+
+  vkGetPhysicalDeviceProperties2(sPhysicalDevice, &props);
+  sShaderGroupHandleSize = rtProps.shaderGroupHandleSize;
+
+  std::vector<std::byte> shaderGroupHandles(sShaderGroupHandleSize * 3);
+
+  if (auto result = vkGetRayTracingShaderGroupHandlesNV(
+        sDevice, sPipeline, 0 /* firstGroup */, 3 /* groupCount */,
+        shaderGroupHandles.size(), shaderGroupHandles.data());
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(
+      vk::make_error_code(result), "vkGetRayTracingShaderGroupHandlesNV"));
+  }
+
+  VkBufferCreateInfo bufferCI = {};
+  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferCI.size = sShaderGroupHandleSize * 3;
+  bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+  VmaAllocationCreateInfo allocationCI = {};
+  allocationCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+
+  VkBuffer stagingBuffer;
+  VmaAllocation stagingAllocation;
+
+  if (auto result =
+        vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI, &stagingBuffer,
+                        &stagingAllocation, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
+  }
+
+  void* pStaging;
+  if (auto result = vmaMapMemory(sAllocator, stagingAllocation, &pStaging);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaMapMemory"));
+  }
+
+  std::memcpy(pStaging, shaderGroupHandles.data(), shaderGroupHandles.size());
+  vmaUnmapMemory(sAllocator, stagingAllocation);
+
+  char objectName[] = "sShaderBindingTable";
+
+  bufferCI = {};
+  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferCI.size = sShaderGroupHandleSize * 3;
+  bufferCI.usage =
+    VK_BUFFER_USAGE_RAY_TRACING_BIT_NV | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+  allocationCI = {};
+  allocationCI.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
+  allocationCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+  allocationCI.pUserData = objectName;
+
+  if (auto result = vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI,
+                                    &sShaderBindingTable,
+                                    &sShaderBindingTableAllocation, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
+  }
+
+  auto commandBuffer = BeginOneTimeSubmit();
+  if (!commandBuffer) {
+    LOG_LEAVE();
+    return tl::unexpected(commandBuffer.error());
+  }
+
+  VkBufferCopy region = {};
+  region.srcOffset = 0;
+  region.dstOffset = 0;
+  region.size = bufferCI.size;
+
+  vkCmdCopyBuffer(*commandBuffer, stagingBuffer, sShaderBindingTable, 1,
+                  &region);
+
+  if (auto result = EndOneTimeSubmit(*commandBuffer); !result) {
+    LOG_LEAVE();
+    return tl::unexpected(result.error());
+  }
+
+  vmaDestroyBuffer(sAllocator, stagingBuffer, stagingAllocation);
+
+  Ensures(sShaderBindingTable != VK_NULL_HANDLE);
+  Ensures(sShaderBindingTableAllocation != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
+  return {};
+} // CreateShaderBindingTable
+
+static tl::expected<void, std::system_error> CreateDescriptorSets() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sDescriptorPool != VK_NULL_HANDLE);
+  Expects(sBottomLevelAccelerationStructure != VK_NULL_HANDLE);
+  Expects(sTopLevelAccelerationStructure != VK_NULL_HANDLE);
+  Expects(sUniformBuffer != VK_NULL_HANDLE);
+  Expects(sOutputImage != VK_NULL_HANDLE);
+
+  sDescriptorSets.resize(1);
+
+  VkDescriptorSetAllocateInfo descriptorSetAI = {};
+  descriptorSetAI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  descriptorSetAI.descriptorPool = sDescriptorPool;
+  descriptorSetAI.descriptorSetCount =
+    gsl::narrow_cast<std::uint32_t>(sDescriptorSets.size());
+  descriptorSetAI.pSetLayouts = &sDescriptorSetLayout;
+
+  if (auto result = vkAllocateDescriptorSets(sDevice, &descriptorSetAI,
+                                             sDescriptorSets.data());
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(vk::make_error_code(result),
+                                            "vkAllocateDescriptorSets"));
+  }
+
+  std::array<VkAccelerationStructureNV, 2> accelerationStructures = {
+    sBottomLevelAccelerationStructure, sTopLevelAccelerationStructure};
+
+  VkWriteDescriptorSetAccelerationStructureNV accelerationStructureInfo = {};
+  accelerationStructureInfo.sType =
+    VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_NV;
+  accelerationStructureInfo.accelerationStructureCount =
+    gsl::narrow_cast<std::uint32_t>(accelerationStructures.size());
+  accelerationStructureInfo.pAccelerationStructures =
+    accelerationStructures.data();
+
+  VkDescriptorImageInfo imageInfo = {};
+  imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  imageInfo.imageView = sOutputImageView;
+
+  VkDescriptorBufferInfo bufferInfo = {};
+  bufferInfo.buffer = sUniformBuffer;
+  bufferInfo.offset = 0;
+  bufferInfo.range = sizeof(UniformBuffer);
+
+  std::array<VkWriteDescriptorSet, 3> writeDescriptorSets;
+
+  writeDescriptorSets[0] = {};
+  writeDescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  writeDescriptorSets[0].pNext = &accelerationStructureInfo;
+  writeDescriptorSets[0].dstSet = sDescriptorSets[0];
+  writeDescriptorSets[0].dstBinding = 0;
+  writeDescriptorSets[0].descriptorCount = 1;
+  writeDescriptorSets[0].descriptorType =
+    VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_NV;
+
+  writeDescriptorSets[1] = {};
+  writeDescriptorSets[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  writeDescriptorSets[1].dstSet = sDescriptorSets[0];
+  writeDescriptorSets[1].dstBinding = 1;
+  writeDescriptorSets[1].descriptorCount = 1;
+  writeDescriptorSets[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+  writeDescriptorSets[1].pImageInfo = &imageInfo;
+
+  writeDescriptorSets[2] = {};
+  writeDescriptorSets[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  writeDescriptorSets[2].pNext = &accelerationStructureInfo;
+  writeDescriptorSets[2].dstSet = sDescriptorSets[0];
+  writeDescriptorSets[2].dstBinding = 2;
+  writeDescriptorSets[2].descriptorCount = 1;
+  writeDescriptorSets[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  writeDescriptorSets[2].pBufferInfo = &bufferInfo;
+
+  vkUpdateDescriptorSets(
+    sDevice, gsl::narrow_cast<std::uint32_t>(writeDescriptorSets.size()),
+    writeDescriptorSets.data(), 0, nullptr);
+
+  Ensures(!sDescriptorSets.empty());
+
+  LOG_LEAVE();
+  return {};
+} // CreateDescriptorSets
+
+static tl::expected<void, std::system_error> CreateSyncObjects() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(!sFrames.empty());
+
+  VkFenceCreateInfo fenceCI = {};
+  fenceCI.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+  fenceCI.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+  sFramesComplete.resize(sFrames.size());
+  for (std::size_t i = 0; i < sFramesComplete.size(); ++i) {
+    if (auto result =
+          vkCreateFence(sDevice, &fenceCI, nullptr, &sFramesComplete[i]);
+        result != VK_SUCCESS) {
+      LOG_LEAVE();
+      return tl::unexpected(
+        std::system_error(vk::make_error_code(result), "vkCreateFence"));
+    }
+
+    NameObject(sDevice, VK_OBJECT_TYPE_FENCE, sFramesComplete[i],
+               "sFramesComplete");
+  }
+
+  VkSemaphoreCreateInfo semaphoreCI = {};
+  semaphoreCI.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+  if (auto result =
+        vkCreateSemaphore(sDevice, &semaphoreCI, nullptr, &sRenderFinished);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkCreateSemaphore"));
+  }
+
+  NameObject(sDevice, VK_OBJECT_TYPE_SEMAPHORE, sRenderFinished,
+             "sRenderFinished");
+
+  Ensures(!sFramesComplete.empty());
+  Ensures(sRenderFinished != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
+  return {};
+} // CreateSyncObjects
+
+static tl::expected<void, std::system_error> RecreateSwapchain() noexcept {
+  int width = 0, height = 0;
+  while (width == 0 || height == 0) {
+    glfwGetFramebufferSize(sWindow, &width, &height);
+    glfwWaitEvents();
+  }
+
+  vkDeviceWaitIdle(sDevice);
+
+  // TODO: Clean up swapchain, swapchain image views, framebuffers
+
+  // clang-format off
+  return CreateSwapchain()
+    .and_then(CreateSwapchainImagesAndViews)
+    .and_then(CreateFramebuffers)
+    .and_then(CreateOutputImage)
+    ;
+  // clang-format on
+} // RecreateSwapchain
+
+static tl::expected<void, std::system_error> Draw() noexcept {
+  VkFence frameComplete = sFramesComplete[sCurrentFrame];
+
+  if (auto result =
+        vkWaitForFences(sDevice, 1, &frameComplete, VK_TRUE, UINT64_MAX);
+      result != VK_SUCCESS) {
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkWaitForFences"));
+  }
+
+  if (auto result = vkResetFences(sDevice, 1, &frameComplete);
+      result != VK_SUCCESS) {
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkResetFences"));
+  }
+
+  auto&& frame = sFrames[sCurrentFrame];
+  VkSemaphore submitWaitSemaphore = frame.imageAvailable;
+
+  VkAcquireNextImageInfoKHR nextInfo = {};
+  nextInfo.sType = VK_STRUCTURE_TYPE_ACQUIRE_NEXT_IMAGE_INFO_KHR;
+  nextInfo.swapchain = sSwapchain;
+  nextInfo.timeout = UINT64_MAX;
+  nextInfo.semaphore = frame.imageAvailable;
+
+  VkResult result = vkAcquireNextImage2KHR(sDevice, &nextInfo, &sCurrentFrame);
+
+  if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+    if (auto recreated = RecreateSwapchain(); !recreated) {
+      return tl::unexpected(recreated.error());
+    }
+    result = vkAcquireNextImage2KHR(sDevice, &nextInfo, &sCurrentFrame);
+  }
+
+  if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkAcquireNextImage2KHR"));
+  }
+
+  frame = sFrames[sCurrentFrame];
+
+  if (auto result = vkResetCommandPool(sDevice, frame.commandPool, 0);
+      result != VK_SUCCESS) {
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkResetCommandPool"));
+  }
+
+  VkCommandBufferBeginInfo commandBufferBI = {};
+  commandBufferBI.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  commandBufferBI.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+
+  vkBeginCommandBuffer(frame.commandBuffer, &commandBufferBI);
+
+  VkImageSubresourceRange sr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+  VkImageMemoryBarrier readyBarrier = {};
+  readyBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+  readyBarrier.srcAccessMask = 0;
+  readyBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  readyBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  readyBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  readyBarrier.srcQueueFamilyIndex = readyBarrier.dstQueueFamilyIndex =
+    VK_QUEUE_FAMILY_IGNORED;
+  readyBarrier.image = sOutputImage;
+  readyBarrier.subresourceRange = sr;
+
+  vkCmdPipelineBarrier(frame.commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &readyBarrier);
+
+  vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_NV,
+                    sPipeline);
+  vkCmdBindDescriptorSets(
+    frame.commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_NV, sPipelineLayout,
+    0, gsl::narrow_cast<std::uint32_t>(sDescriptorSets.size()),
+    sDescriptorSets.data(), 0, nullptr);
+
+  VkDeviceSize rayGenOffset = 0;
+  VkDeviceSize missOffset = sShaderGroupHandleSize;
+  VkDeviceSize missStride = sShaderGroupHandleSize;
+  VkDeviceSize hitGroupOffset = sShaderGroupHandleSize;
+  VkDeviceSize hitGroupStride = sShaderGroupHandleSize;
+
+  vkCmdTraceRaysNV(
+    frame.commandBuffer, sShaderBindingTable, rayGenOffset, sShaderBindingTable,
+    missOffset, missStride, sShaderBindingTable, hitGroupOffset, hitGroupStride,
+    VK_NULL_HANDLE, 0, 0, sSwapchainExtent.width, sSwapchainExtent.height, 1);
+
+  VkImageMemoryBarrier tracedBarrier = {};
+  tracedBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+  tracedBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  tracedBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+  tracedBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+  tracedBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  tracedBarrier.srcQueueFamilyIndex = tracedBarrier.dstQueueFamilyIndex =
+    VK_QUEUE_FAMILY_IGNORED;
+  tracedBarrier.image = sOutputImage;
+  tracedBarrier.subresourceRange = sr;
+
+  vkCmdPipelineBarrier(frame.commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &tracedBarrier);
+
+  VkImageMemoryBarrier barrier = {};
+  barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+  barrier.srcAccessMask = 0;
+  barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex =
+    VK_QUEUE_FAMILY_IGNORED;
+  barrier.image = sSwapchainImages[sCurrentFrame];
+  barrier.subresourceRange = sr;
+
+  vkCmdPipelineBarrier(frame.commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &barrier);
+
+  VkImageCopy copy = {};
+  copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  copy.srcOffset = {0, 0, 0};
+  copy.dstSubresource = copy.srcSubresource;
+  copy.dstOffset = {0, 0, 0};
+  copy.extent = {sSwapchainExtent.width, sSwapchainExtent.height, 1};
+
+  vkCmdCopyImage(frame.commandBuffer, sOutputImage,
+                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 sSwapchainImages[sCurrentFrame],
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+  barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  barrier.dstAccessMask = 0;
+  barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+  vkCmdPipelineBarrier(frame.commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &barrier);
+
+  vkEndCommandBuffer(frame.commandBuffer);
+
+  VkPipelineStageFlags waitDstStageMask =
+    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  VkSubmitInfo submitInfo = {};
+  submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submitInfo.waitSemaphoreCount = 1;
+  submitInfo.pWaitSemaphores = &submitWaitSemaphore;
+  submitInfo.pWaitDstStageMask = &waitDstStageMask;
+  submitInfo.commandBufferCount = 1;
+  submitInfo.pCommandBuffers = &frame.commandBuffer;
+  submitInfo.signalSemaphoreCount = 1;
+  submitInfo.pSignalSemaphores = &sRenderFinished;
+
+  if (result = vkQueueSubmit(sQueue, 1, &submitInfo, frameComplete);
+      result != VK_SUCCESS) {
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkQueueSubmit"));
+  }
+
+  VkPresentInfoKHR presentInfo = {};
+  presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+  presentInfo.waitSemaphoreCount = 1;
+  presentInfo.pWaitSemaphores = &sRenderFinished;
+  presentInfo.swapchainCount = 1;
+  presentInfo.pSwapchains = &sSwapchain;
+  presentInfo.pImageIndices = &sCurrentFrame;
+
+  if (result = vkQueuePresentKHR(sQueue, &presentInfo); result != VK_SUCCESS) {
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkQueuePresentKHR"));
+  }
+
+  return {};
+} // Draw
+
 int main() {
   // clang-format off
-  auto res = InitWindow()
+  auto result = InitWindow()
     .and_then(InitVulkan)
     .and_then(CreateDebugUtilsMessenger)
     .and_then(ChoosePhysicalDevice)
     .and_then(CreateDevice)
+    .and_then(CreateCommandPool)
+    .and_then(CreateAllocator)
+    .and_then(CreateRenderPass)
     .and_then(CreateSurface)
+    .and_then(VerifySurfaceFormat)
+    .and_then(CreateFrames)
     .and_then(CreateSwapchain)
+    .and_then(CreateSwapchainImagesAndViews)
+    .and_then(CreateFramebuffers)
+    .and_then(CreateDescriptorPool)
+    .and_then(CreateDescriptorSetLayout)
+    .and_then(CreatePipeline)
+    .and_then(CreateUniformBuffer)
+    .and_then(CreateOutputImage)
+    .and_then(CreateBottomLevelAccelerationStructures)
+    .and_then(CreateTopLevelAccelerationStructure)
+    .and_then(BuildAccelerationStructures)
+    .and_then(CreateShaderBindingTable)
+    .and_then(CreateDescriptorSets)
+    .and_then(CreateSyncObjects)
     ;
   // clang-format on
 
-  if (!res) {
-    std::fprintf(stderr, "%s\n", res.error().what());
+  if (!result) {
+    std::fprintf(stderr, "%s\n", result.error().what());
     std::exit(EXIT_FAILURE);
   }
 
   while (!glfwWindowShouldClose(sWindow)) {
     glfwPollEvents();
-    Draw();
+    if (result = Draw(); !result) {
+      std::fprintf(stderr, "%s\n", result.error().what());
+      std::exit(EXIT_FAILURE);
+    }
   }
 }
