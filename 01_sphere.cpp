@@ -1428,13 +1428,16 @@ static tl::expected<void, std::system_error> CreatePipeline() noexcept {
   std::array<VkRayTracingShaderGroupCreateInfoNV, 3> groups = {
     VkRayTracingShaderGroupCreateInfoNV{
       VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_NV, nullptr,
-      VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_NV, 0, 0, 0, 0},
+      VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_NV, 0, VK_SHADER_UNUSED_NV,
+      VK_SHADER_UNUSED_NV, VK_SHADER_UNUSED_NV},
     VkRayTracingShaderGroupCreateInfoNV{
       VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_NV, nullptr,
-      VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_NV, 1, 0, 0, 0},
+      VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_NV, 1, VK_SHADER_UNUSED_NV,
+      VK_SHADER_UNUSED_NV, VK_SHADER_UNUSED_NV},
     VkRayTracingShaderGroupCreateInfoNV{
       VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_NV, nullptr,
-      VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_NV, 0, 2, 0, 3}};
+      VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_NV,
+      VK_SHADER_UNUSED_NV, 2, VK_SHADER_UNUSED_NV, 3}};
 
   VkRayTracingPipelineCreateInfoNV pipelineCI = {};
   pipelineCI.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_NV;
@@ -1893,6 +1896,8 @@ static tl::expected<void, std::system_error> BuildAccelerationStructures() noexc
   }
 
   std::memset(instanceData, sizeof(Instance), 0);
+  instanceData->transform[0] = instanceData->transform[5] =
+    instanceData->transform[10] = 1.f;
   instanceData->mask = 0xF;
   instanceData->accelerationStructureHandle =
     *reinterpret_cast<std::uint64_t*>(bottomLevelHandle.data());
@@ -1952,6 +1957,16 @@ static tl::expected<void, std::system_error> BuildAccelerationStructures() noexc
     sBottomLevelAccelerationStructure /* dst */, VK_NULL_HANDLE /* src */,
     scratchBuffer, 0 /* scratchOffset */);
 
+  VkMemoryBarrier barrier = {};
+  barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+  barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_NV;
+  barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_NV;
+
+  vkCmdPipelineBarrier(*commandBuffer,
+                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_NV,
+                       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_NV, 0,
+                       1, &barrier, 0, nullptr, 0, nullptr);
+
   vkCmdBuildAccelerationStructureNV(
     *commandBuffer, &topLevelASInfo, instanceBuffer /* instanceData */,
     0 /* instanceOffset */, VK_FALSE /* update */,
@@ -1997,12 +2012,10 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
       vk::make_error_code(result), "vkGetRayTracingShaderGroupHandlesNV"));
   }
 
-  std::uint32_t hitRecordStride = sizeof(Sphere) + sShaderGroupHandleSize;
-
   VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
   bufferCI.size = gsl::narrow_cast<std::uint32_t>(
-    sShaderGroupHandleSize * 2 + hitRecordStride * sSpheres.size());
+    sShaderGroupHandleSize * 3 + sizeof(Sphere) * sSpheres.size());
   bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
   VmaAllocationCreateInfo allocationCI = {};
@@ -2041,12 +2054,11 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
   offset += sShaderGroupHandleSize;
 
   // hit groups
-  for (auto&& sphere : sSpheres) {
-    std::memcpy(stagingData + offset,
-                shaderGroupHandles.data() + (sShaderGroupHandleSize * 2),
-                sShaderGroupHandleSize);
-    offset += sShaderGroupHandleSize;
+  std::memcpy(stagingData + offset, shaderGroupHandles.data() + offset,
+              sShaderGroupHandleSize);
+  offset += sShaderGroupHandleSize;
 
+  for (auto&& sphere : sSpheres) {
     std::memcpy(stagingData + offset, &sSpheres[0], sizeof(Sphere));
     offset += sizeof(Sphere);
   }
@@ -2126,16 +2138,12 @@ static tl::expected<void, std::system_error> CreateDescriptorSets() noexcept {
                                             "vkAllocateDescriptorSets"));
   }
 
-  std::array<VkAccelerationStructureNV, 2> accelerationStructures = {
-    sBottomLevelAccelerationStructure, sTopLevelAccelerationStructure};
-
   VkWriteDescriptorSetAccelerationStructureNV accelerationStructureInfo = {};
   accelerationStructureInfo.sType =
     VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_NV;
-  accelerationStructureInfo.accelerationStructureCount =
-    gsl::narrow_cast<std::uint32_t>(accelerationStructures.size());
+  accelerationStructureInfo.accelerationStructureCount = 1;
   accelerationStructureInfo.pAccelerationStructures =
-    accelerationStructures.data();
+    &sTopLevelAccelerationStructure;
 
   VkDescriptorImageInfo imageInfo = {};
   imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -2472,6 +2480,8 @@ int main() {
     std::fprintf(stderr, "%s\n", result.error().what());
     std::exit(EXIT_FAILURE);
   }
+
+  vkDeviceWaitIdle(sDevice); // allow all initialization to complete
 
   while (!glfwWindowShouldClose(sWindow)) {
     glfwPollEvents();
