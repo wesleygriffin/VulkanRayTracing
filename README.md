@@ -1,5 +1,9 @@
 # VulkanRayTracing
-Examples for using the real-time raytracing extensions in Vulkan
+Examples for using the real-time raytracing extensions in Vulkan.
+
+Inspiration from:
+- [Alexander Overvoorde's Vulkan Tutorial](https://vulkan-tutorial.com/)
+- [Peter Shirley's Ray Tracing in One Weekend](http://in1weekend.blogspot.com/2016/01/ray-tracing-in-one-weekend.html)
 
 ## Building
 
