@@ -2062,6 +2062,7 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
                   &region);
 
   if (auto result = EndOneTimeSubmit(*commandBuffer); !result) {
+    LOG_LEAVE();
     return tl::unexpected(result.error());
   }
 
