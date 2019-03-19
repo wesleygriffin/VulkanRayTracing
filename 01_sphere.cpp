@@ -2030,7 +2030,8 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
 
   char objectName[] = "sShaderBindingTable";
 
-  bufferCI.usage = VK_BUFFER_USAGE_RAY_TRACING_BIT_NV;
+  bufferCI.usage =
+    VK_BUFFER_USAGE_RAY_TRACING_BIT_NV | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
   std::fprintf(stderr, "sShaderBindingTable size: %d\n", bufferCI.size);
 
   allocationCI.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
@@ -2064,10 +2065,10 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
     return tl::unexpected(result.error());
   }
 
+  vmaDestroyBuffer(sAllocator, stagingBuffer, stagingAllocation);
+
   Ensures(sShaderBindingTable != VK_NULL_HANDLE);
   Ensures(sShaderBindingTableAllocation != VK_NULL_HANDLE);
-
-  vmaDestroyBuffer(sAllocator, stagingBuffer, stagingAllocation);
 
   LOG_LEAVE();
   return {};
