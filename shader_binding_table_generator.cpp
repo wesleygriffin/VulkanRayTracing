@@ -49,8 +49,8 @@ VkResult ShaderBindingTableGenerator::Generate(VkDevice device,
   std::fprintf(stderr, "HitGroupStride: %zu\n", HitGroupStride());
   std::fprintf(stderr, "HitGroupSize: %zu\n", HitGroupSize());
 
-  std::uint32_t const groupCount =
-    rayGenEntries_.size() + missEntries_.size() + hitGroupEntries_.size();
+  std::uint32_t const groupCount = gsl::narrow_cast<std::uint32_t>(
+    rayGenEntries_.size() + missEntries_.size() + hitGroupEntries_.size());
   std::fprintf(stderr, "groupCount: %d shaderGroupHandleSize_: %zu\n",
                groupCount, shaderGroupHandleSize_);
 
