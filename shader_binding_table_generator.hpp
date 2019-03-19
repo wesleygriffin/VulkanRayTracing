@@ -77,7 +77,7 @@ public:
     return HitGroupStride() * hitGroupEntries_.size();
   }
 
-  VkResult Generate(VkDevice device, VkPipeline pipeline, VkBuffer buffer,
+  VkResult Generate(VkDevice device, VkPipeline pipeline,
                     VkDeviceMemory memory);
 
   struct SBTEntry {

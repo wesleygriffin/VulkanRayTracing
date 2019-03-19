@@ -1909,6 +1909,7 @@ CreateTopLevelAccelerationStructure() noexcept {
   instanceData->transform[0] = instanceData->transform[5] =
     instanceData->transform[10] = 1.f;
   instanceData->mask = 0xF;
+  instanceData->instanceOffset = 0;
   instanceData->accelerationStructureHandle =
     *reinterpret_cast<std::uint64_t*>(bottomLevelHandle.data());
 
@@ -1992,6 +1993,8 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
   sShaderBindingTableGenerator.AddHitGroup(
     2, gsl::make_span(reinterpret_cast<std::byte*>(sSpheres.data()),
                       sSpheres.size() * sizeof(Sphere)));
+  std::fprintf(stderr, "hit group data size: %zu\n",
+               sSpheres.size() * sizeof(Sphere));
 
   char objectName[] = "sShaderBindingTable";
 
@@ -2000,6 +2003,7 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
   bufferCI.size =
     sShaderBindingTableGenerator.ComputeSize(sShaderGroupHandleSize);
   bufferCI.usage = VK_BUFFER_USAGE_RAY_TRACING_BIT_NV;
+  std::fprintf(stderr, "sShaderBindingTable size: %d\n", bufferCI.size);
 
   VmaAllocationCreateInfo allocationCI = {};
   allocationCI.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
@@ -2018,8 +2022,8 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
   VmaAllocationInfo info;
   vmaGetAllocationInfo(sAllocator, sShaderBindingTableAllocation, &info);
 
-  if (auto result = sShaderBindingTableGenerator.Generate(
-        sDevice, sPipeline, sShaderBindingTable, info.deviceMemory);
+  if (auto result = sShaderBindingTableGenerator.Generate(sDevice, sPipeline,
+                                                          info.deviceMemory);
       result != VK_SUCCESS) {
     LOG_LEAVE();
     return tl::unexpected(std::system_error(

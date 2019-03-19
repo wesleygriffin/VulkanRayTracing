@@ -30,11 +30,9 @@ VkDeviceSize ShaderBindingTableGenerator::ComputeSize(
 
 VkResult ShaderBindingTableGenerator::Generate(VkDevice device,
                                                VkPipeline pipeline,
-                                               VkBuffer buffer,
                                                VkDeviceMemory memory) {
   Expects(device != VK_NULL_HANDLE);
   Expects(pipeline != VK_NULL_HANDLE);
-  Expects(buffer != VK_NULL_HANDLE);
   Expects(memory != VK_NULL_HANDLE);
   Expects(shaderGroupHandleSize_ > 0);
   Expects(rayGenEntrySize_ >= 0);
@@ -42,8 +40,19 @@ VkResult ShaderBindingTableGenerator::Generate(VkDevice device,
   Expects(hitGroupEntrySize_ >= 0);
   Expects(sbtSize_ > 0);
 
+  std::fprintf(stderr, "RayGenStride: %zu\n", RayGenStride());
+  std::fprintf(stderr, "RayGenSize: %zu\n", RayGenSize());
+  std::fprintf(stderr, "MissOffset: %zu\n", MissOffset());
+  std::fprintf(stderr, "MissStride: %zu\n", MissStride());
+  std::fprintf(stderr, "MissSize: %zu\n", MissSize());
+  std::fprintf(stderr, "HitGroupOffset: %zu\n", HitGroupOffset());
+  std::fprintf(stderr, "HitGroupStride: %zu\n", HitGroupStride());
+  std::fprintf(stderr, "HitGroupSize: %zu\n", HitGroupSize());
+
   std::uint32_t const groupCount =
     rayGenEntries_.size() + missEntries_.size() + hitGroupEntries_.size();
+  std::fprintf(stderr, "groupCount: %d shaderGroupHandleSize_: %zu\n",
+               groupCount, shaderGroupHandleSize_);
 
   std::vector<std::byte> shaderHandleStorage(groupCount *
                                              shaderGroupHandleSize_);
@@ -61,15 +70,22 @@ VkResult ShaderBindingTableGenerator::Generate(VkDevice device,
   }
 
   VkDeviceSize offset = 0;
+  std::fprintf(stderr, "offset: %zu\n", offset);
+
   offset += CopyShaderData(
     device, pipeline, reinterpret_cast<std::byte*>(pBuffer) + offset,
     rayGenEntries_, rayGenEntrySize_, shaderHandleStorage.data());
+  std::fprintf(stderr, "offset: %zu\n", offset);
+
   offset += CopyShaderData(
     device, pipeline, reinterpret_cast<std::byte*>(pBuffer) + offset,
     missEntries_, missEntrySize_, shaderHandleStorage.data());
+  std::fprintf(stderr, "offset: %zu\n", offset);
+
   offset += CopyShaderData(
     device, pipeline, reinterpret_cast<std::byte*>(pBuffer) + offset,
     hitGroupEntries_, hitGroupEntrySize_, shaderHandleStorage.data());
+  std::fprintf(stderr, "offset: %zu\n", offset);
 
   vkUnmapMemory(device, memory);
   return VK_SUCCESS;
@@ -99,6 +115,12 @@ VkDeviceSize ShaderBindingTableGenerator::CopyShaderData(
                 pShaderHandleStorage.get() +
                   shader.groupIndex * shaderGroupHandleSize_,
                 shaderGroupHandleSize_);
+
+    std::fprintf(stderr, "groupIndex: %d handle: 0x", shader.groupIndex);
+    for (int i = 0; i < shaderGroupHandleSize_; ++i) {
+      std::fprintf(stderr, "%0x", pData[i]);
+    }
+    std::fprintf(stderr, "\n");
 
     if (!shader.inlineData.empty()) {
       std::memcpy(pData + shaderGroupHandleSize_, shader.inlineData.data(),
