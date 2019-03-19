@@ -73,7 +73,7 @@ inline std::string to_string(VulkanResult result) noexcept {
   return "unknown"s;
 } // to_string
 
-inline [[nodiscard]] std::string to_string(VkResult result) noexcept {
+[[nodiscard]] inline std::string to_string(VkResult result) noexcept {
   return to_string(static_cast<VulkanResult>(result));
 }
 
@@ -92,15 +92,15 @@ public:
 
 inline VulkanResultCategory const gVulkanResultCategory;
 
-inline [[nodiscard]] std::error_category const& GetVulkanResultCategory() {
+[[nodiscard]] inline std::error_category const& GetVulkanResultCategory() {
   return gVulkanResultCategory;
 }
 
-inline [[nodiscard]] std::error_code make_error_code(VulkanResult r) noexcept {
+[[nodiscard]] inline std::error_code make_error_code(VulkanResult r) noexcept {
   return std::error_code(static_cast<int>(r), GetVulkanResultCategory());
 }
 
-inline [[nodiscard]] std::error_code make_error_code(VkResult r) noexcept {
+[[nodiscard]] inline std::error_code make_error_code(VkResult r) noexcept {
   return std::error_code(static_cast<int>(r), GetVulkanResultCategory());
 }
 

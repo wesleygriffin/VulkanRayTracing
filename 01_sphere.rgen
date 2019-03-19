@@ -24,7 +24,7 @@ void main() {
     camera.W.xyz);
 
   uint rayFlags = gl_RayFlagsOpaqueNV;
-  uint cullMask = 0xFF;
+  uint cullMask = 0xF; // 8 bits only
   float tmin = .001f;
   float tmax = 10000.f;
 

@@ -364,7 +364,7 @@ CreateDebugUtilsMessenger() noexcept {
   return {};
 } // CreateDebugUtilsMessenger
 
-static [[nodiscard]] std::uint32_t
+[[nodiscard]] static std::uint32_t
 GetQueueFamilyIndex(VkPhysicalDevice device, VkQueueFlags queueFlags) noexcept {
   LOG_ENTER();
   Expects(device != VK_NULL_HANDLE);
@@ -396,7 +396,7 @@ GetQueueFamilyIndex(VkPhysicalDevice device, VkQueueFlags queueFlags) noexcept {
   return UINT32_MAX;
 } // GetQueueFamilyIndex
 
-static [[nodiscard]] bool
+[[nodiscard]] static bool
 ComparePhysicalDeviceFeatures(VkPhysicalDeviceFeatures2 a,
                               VkPhysicalDeviceFeatures2 b) noexcept {
   bool result = false;
@@ -487,7 +487,7 @@ ComparePhysicalDeviceFeatures(VkPhysicalDeviceFeatures2 a,
   return result;
 } // ComparePhysicalDeviceFeatures
 
-static [[nodiscard]] tl::expected<bool, std::system_error> IsPhysicalDeviceGood(
+[[nodiscard]] static tl::expected<bool, std::system_error> IsPhysicalDeviceGood(
   VkPhysicalDevice device, VkPhysicalDeviceFeatures2 features,
   gsl::span<gsl::czstring> extensions, VkQueueFlags queueFlags) noexcept {
   LOG_ENTER();
@@ -717,7 +717,7 @@ static tl::expected<void, std::system_error> CreateCommandPool() noexcept {
   return {};
 } // CreateCommandPool
 
-static [[nodiscard]] tl::expected<VkCommandBuffer, std::system_error>
+[[nodiscard]] static tl::expected<VkCommandBuffer, std::system_error>
 BeginOneTimeSubmit() noexcept {
   LOG_ENTER();
   Expects(sDevice != VK_NULL_HANDLE);
@@ -1333,7 +1333,7 @@ CreateDescriptorSetLayout() noexcept {
   return {};
 } // CreateDescriptorSetLayout
 
-static [[nodiscard]] tl::expected<VkShaderModule, std::system_error>
+[[nodiscard]] static tl::expected<VkShaderModule, std::system_error>
 CreateShaderModule(gsl::czstring filename) noexcept {
   LOG_ENTER();
   Expects(sDevice != VK_NULL_HANDLE);
@@ -1885,7 +1885,7 @@ CreateTopLevelAccelerationStructure() noexcept {
       std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
   }
 
-  struct Instance {
+  struct VkGeometryInstanceNV {
     float transform[12];
     std::uint32_t instanceCustomIndex : 24;
     std::uint32_t mask : 8;
@@ -1894,15 +1894,16 @@ CreateTopLevelAccelerationStructure() noexcept {
     std::uint64_t accelerationStructureHandle;
   };
 
-  Instance* instanceData;
-  if (auto ptr = MapMemory<Instance*>(sAllocator, instanceAllocation)) {
+  VkGeometryInstanceNV* instanceData;
+  if (auto ptr =
+        MapMemory<VkGeometryInstanceNV*>(sAllocator, instanceAllocation)) {
     instanceData = *ptr;
   } else {
     LOG_LEAVE();
     return tl::unexpected(ptr.error());
   }
 
-  std::memset(instanceData, sizeof(Instance), 0);
+  std::memset(instanceData, sizeof(VkGeometryInstanceNV), 0);
   instanceData->transform[0] = instanceData->transform[5] =
     instanceData->transform[10] = 1.f;
   instanceData->mask = 0xF;
@@ -1998,8 +1999,8 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
   VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
   bufferCI.size = gsl::narrow_cast<std::uint32_t>(
-    sShaderGroupHandleSize * 2 +
-    (sShaderGroupHandleSize + sizeof(Sphere)) * sSpheres.size());
+    (sShaderGroupHandleSize * 2) +
+    ((sShaderGroupHandleSize + sizeof(Sphere)) * sSpheres.size()));
   bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
   VmaAllocationCreateInfo allocationCI = {};
@@ -2037,7 +2038,7 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
               sShaderGroupHandleSize);
   offset += sShaderGroupHandleSize;
 
-  // hit groups
+  // hit group
   for (auto&& sphere : sSpheres) {
     std::memcpy(stagingData + offset,
                 shaderGroupHandles.data() + (sShaderGroupHandleSize * 2),
@@ -2047,6 +2048,54 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
     std::memcpy(stagingData + offset, &sphere, sizeof(Sphere));
     offset += sizeof(Sphere);
   }
+
+#ifndef NDEBUG
+  std::printf("0x");
+  for (std::uint32_t i = 0; i < 16; ++i) {
+    std::printf("%0x", stagingData[i]);
+  }
+  std::printf("\n");
+  std::printf("0x");
+  for (std::uint32_t i = 0; i < 16; ++i) {
+    std::printf("%0x", stagingData[16 + i]);
+  }
+  std::printf("\n");
+
+  std::printf("0x");
+  for (std::uint32_t i = 0; i < 16; ++i) {
+    std::printf("%0x", stagingData[32 + i]);
+  }
+  std::printf("\n");
+
+  for (std::uint32_t i = 0; i < 4; ++i) {
+    std::printf(
+      "%g ", *reinterpret_cast<float*>(stagingData + 48 + i * sizeof(float)));
+  }
+  std::printf("\n");
+
+  std::printf("0x");
+  for (std::uint32_t i = 0; i < 16; ++i) {
+    std::printf("%0x", stagingData[64 + i]);
+  }
+  std::printf("\n");
+
+  for (std::uint32_t i = 0; i < 4; ++i) {
+    std::printf(
+      "%g ", *reinterpret_cast<float*>(stagingData + 80 + i * sizeof(float)));
+  }
+  std::printf("\n");
+
+  std::uint32_t i;
+  for (i = 0; i < bufferCI.size; i += 4) {
+    std::printf("%4d:  %04x %04x %04x %04x\n", i, stagingData[i + 0],
+                stagingData[i + 1], stagingData[i + 2], stagingData[i + 3]);
+  }
+  if (i < bufferCI.size) {
+    std::printf("%4d:  ", i);
+    while (i < bufferCI.size) std::printf("%04x ", stagingData[i]);
+    std::printf("\n");
+  }
+#endif
 
   vmaUnmapMemory(sAllocator, stagingAllocation);
 
@@ -2343,10 +2392,22 @@ static tl::expected<void, std::system_error> Draw() noexcept {
   VkDeviceSize hitGroupOffset = missOffset + missStride;
   VkDeviceSize hitGroupStride = sShaderGroupHandleSize + sizeof(Sphere);
 
-  vkCmdTraceRaysNV(
-    frame.commandBuffer, sShaderBindingTable, rayGenOffset, sShaderBindingTable,
-    missOffset, missStride, sShaderBindingTable, hitGroupOffset, hitGroupStride,
-    VK_NULL_HANDLE, 0, 0, sSwapchainExtent.width, sSwapchainExtent.height, 1);
+  vkCmdTraceRaysNV(frame.commandBuffer,
+                   sShaderBindingTable,     // raygenShaderBindingTableBuffer
+                   rayGenOffset,            // raygenShaderBindingOffset
+                   sShaderBindingTable,     // missShaderBindingTableBuffer
+                   missOffset,              // missShaderBindingOffset
+                   missStride,              // missShaderBindingStride
+                   sShaderBindingTable,     // hitShaderBindingTableBuffer
+                   hitGroupOffset,          // hitShaderBindingOffset
+                   hitGroupStride,          // hitShaderBindingStride
+                   VK_NULL_HANDLE,          // callableShaderBindingTableBuffer
+                   0,                       // callableShaderBindingOffset
+                   0,                       // callableShaderBindingStride
+                   sSwapchainExtent.width,  // width
+                   sSwapchainExtent.height, // height
+                   1                        // depth
+  );
 
   VkImageMemoryBarrier tracedBarrier = {};
   tracedBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -2472,6 +2533,9 @@ int main() {
   sCamera.aspectRatio(static_cast<float>(sSwapchainExtent.width) /
                       static_cast<float>(sSwapchainExtent.height));
 
+  std::uint64_t frameCount = 0;
+  double now = glfwGetTime(), last = now;
+
   while (!glfwWindowShouldClose(sWindow)) {
     glfwPollEvents();
 
@@ -2484,5 +2548,15 @@ int main() {
       std::fprintf(stderr, "%s\n", result.error().what());
       std::exit(EXIT_FAILURE);
     }
+
+    frameCount++;
+    now = glfwGetTime();
+
+    if (frameCount % 100 == 0) {
+      double const delta = now - last;
+      std::printf("%2.5g ms\n", delta * 1000.0);
+    }
+
+    last = now;
   }
 }
