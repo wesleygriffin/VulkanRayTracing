@@ -1996,18 +1996,45 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
   std::fprintf(stderr, "hit group data size: %zu\n",
                sSpheres.size() * sizeof(Sphere));
 
-  char objectName[] = "sShaderBindingTable";
-
   VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
   bufferCI.size =
     sShaderBindingTableGenerator.ComputeSize(sShaderGroupHandleSize);
+  bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+  VmaAllocationCreateInfo allocationCI = {};
+  allocationCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+
+  VkBuffer stagingBuffer;
+  VmaAllocation stagingAllocation;
+
+  if (auto result =
+        vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI, &stagingBuffer,
+                        &stagingAllocation, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
+  }
+
+  VmaAllocationInfo info;
+  vmaGetAllocationInfo(sAllocator, stagingAllocation, &info);
+
+  if (auto result = sShaderBindingTableGenerator.Generate(sDevice, sPipeline,
+                                                          info.deviceMemory);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(std::system_error(
+      vk::make_error_code(result), "ShaderBindingTableGenerator::Generate"));
+  }
+
+  char objectName[] = "sShaderBindingTable";
+
   bufferCI.usage = VK_BUFFER_USAGE_RAY_TRACING_BIT_NV;
   std::fprintf(stderr, "sShaderBindingTable size: %d\n", bufferCI.size);
 
-  VmaAllocationCreateInfo allocationCI = {};
   allocationCI.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
-  allocationCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+  allocationCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
   allocationCI.pUserData = objectName;
 
   if (auto result = vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI,
@@ -2019,19 +2046,28 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
       std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
   }
 
-  VmaAllocationInfo info;
-  vmaGetAllocationInfo(sAllocator, sShaderBindingTableAllocation, &info);
-
-  if (auto result = sShaderBindingTableGenerator.Generate(sDevice, sPipeline,
-                                                          info.deviceMemory);
-      result != VK_SUCCESS) {
+  auto commandBuffer = BeginOneTimeSubmit();
+  if (!commandBuffer) {
     LOG_LEAVE();
-    return tl::unexpected(std::system_error(
-      vk::make_error_code(result), "ShaderBindingTableGenerator::Generate"));
+    return tl::unexpected(commandBuffer.error());
+  }
+
+  VkBufferCopy region = {};
+  region.srcOffset = 0;
+  region.dstOffset = 0;
+  region.size = bufferCI.size;
+
+  vkCmdCopyBuffer(*commandBuffer, stagingBuffer, sShaderBindingTable, 1,
+                  &region);
+
+  if (auto result = EndOneTimeSubmit(*commandBuffer); !result) {
+    return tl::unexpected(result.error());
   }
 
   Ensures(sShaderBindingTable != VK_NULL_HANDLE);
   Ensures(sShaderBindingTableAllocation != VK_NULL_HANDLE);
+
+  vmaDestroyBuffer(sAllocator, stagingBuffer, stagingAllocation);
 
   LOG_LEAVE();
   return {};
