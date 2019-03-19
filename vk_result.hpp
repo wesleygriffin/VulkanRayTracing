@@ -1,5 +1,5 @@
-#ifndef VK_HPP_
-#define VK_HPP_
+#ifndef VK_RESULT_HPP_
+#define VK_RESULT_HPP_
 
 #include <vulkan/vulkan.h>
 #include <system_error>
@@ -106,4 +106,4 @@ inline VulkanResultCategory const gVulkanResultCategory;
 
 } // namespace vk
 
-#endif // VK_HPP_
+#endif // VK_RESULT_HPP_

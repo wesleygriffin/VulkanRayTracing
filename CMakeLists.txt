@@ -24,6 +24,7 @@ add_custom_command(
 
 set(COMMON_SOURCES
   ${CMAKE_CURRENT_BINARY_DIR}/flextVk.cpp
+  shader_binding_table_generator.cpp
 )
 
 add_custom_command(OUTPUT 01_sphere_rgen.spv

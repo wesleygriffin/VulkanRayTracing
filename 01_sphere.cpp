@@ -35,6 +35,7 @@ using PFN_vkCmdCopyBuffer = decltype(vkCmdCopyBuffer);
 #include "glm/mat4x4.hpp"
 #include "glm/gtc/matrix_transform.hpp"
 #include "gsl/gsl-lite.hpp"
+#include "shader_binding_table_generator.hpp"
 #include "vk_result.hpp"
 #include <array>
 #include <cstdio>
@@ -182,6 +183,7 @@ static VkAccelerationStructureNV sTopLevelAccelerationStructure =
 static VmaAllocation sTopLevelAccelerationStructureAllocation = VK_NULL_HANDLE;
 
 static std::uint32_t sShaderGroupHandleSize = 0;
+static ShaderBindingTableGenerator sShaderBindingTableGenerator;
 static VkBuffer sShaderBindingTable = VK_NULL_HANDLE;
 static VmaAllocation sShaderBindingTableAllocation = VK_NULL_HANDLE;
 
@@ -1985,128 +1987,23 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
   sShaderGroupHandleSize = rtProps.shaderGroupHandleSize;
   std::fprintf(stderr, "sShaderGroupHandleSize: %d\n", sShaderGroupHandleSize);
 
-  std::vector<std::byte> shaderGroupHandles(sShaderGroupHandleSize * 3);
-
-  if (auto result = vkGetRayTracingShaderGroupHandlesNV(
-        sDevice, sPipeline, 0 /* firstGroup */, 3 /* groupCount */,
-        shaderGroupHandles.size(), shaderGroupHandles.data());
-      result != VK_SUCCESS) {
-    LOG_LEAVE();
-    return tl::unexpected(std::system_error(
-      vk::make_error_code(result), "vkGetRayTracingShaderGroupHandlesNV"));
-  }
-
-  VkBufferCreateInfo bufferCI = {};
-  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bufferCI.size = gsl::narrow_cast<std::uint32_t>(
-    (sShaderGroupHandleSize * 2) +
-    ((sShaderGroupHandleSize + sizeof(Sphere)) * sSpheres.size()));
-  bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-
-  VmaAllocationCreateInfo allocationCI = {};
-  allocationCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-
-  VkBuffer stagingBuffer;
-  VmaAllocation stagingAllocation;
-
-  if (auto result =
-        vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI, &stagingBuffer,
-                        &stagingAllocation, nullptr);
-      result != VK_SUCCESS) {
-    LOG_LEAVE();
-    return tl::unexpected(
-      std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
-  }
-
-  std::byte* stagingData;
-  if (auto ptr = MapMemory<std::byte*>(sAllocator, stagingAllocation)) {
-    stagingData = *ptr;
-  } else {
-    LOG_LEAVE();
-    return tl::unexpected(ptr.error());
-  }
-
-  std::size_t offset = 0;
-
-  // raygen
-  std::memcpy(stagingData + offset, shaderGroupHandles.data() + offset,
-              sShaderGroupHandleSize);
-  offset += sShaderGroupHandleSize;
-
-  // miss
-  std::memcpy(stagingData + offset, shaderGroupHandles.data() + offset,
-              sShaderGroupHandleSize);
-  offset += sShaderGroupHandleSize;
-
-  // hit group
-  for (auto&& sphere : sSpheres) {
-    std::memcpy(stagingData + offset,
-                shaderGroupHandles.data() + (sShaderGroupHandleSize * 2),
-                sShaderGroupHandleSize);
-    offset += sShaderGroupHandleSize;
-
-    std::memcpy(stagingData + offset, &sphere, sizeof(Sphere));
-    offset += sizeof(Sphere);
-  }
-
-#ifndef NDEBUG
-  std::printf("0x");
-  for (std::uint32_t i = 0; i < 16; ++i) {
-    std::printf("%0x", stagingData[i]);
-  }
-  std::printf("\n");
-  std::printf("0x");
-  for (std::uint32_t i = 0; i < 16; ++i) {
-    std::printf("%0x", stagingData[16 + i]);
-  }
-  std::printf("\n");
-
-  std::printf("0x");
-  for (std::uint32_t i = 0; i < 16; ++i) {
-    std::printf("%0x", stagingData[32 + i]);
-  }
-  std::printf("\n");
-
-  for (std::uint32_t i = 0; i < 4; ++i) {
-    std::printf(
-      "%g ", *reinterpret_cast<float*>(stagingData + 48 + i * sizeof(float)));
-  }
-  std::printf("\n");
-
-  std::printf("0x");
-  for (std::uint32_t i = 0; i < 16; ++i) {
-    std::printf("%0x", stagingData[64 + i]);
-  }
-  std::printf("\n");
-
-  for (std::uint32_t i = 0; i < 4; ++i) {
-    std::printf(
-      "%g ", *reinterpret_cast<float*>(stagingData + 80 + i * sizeof(float)));
-  }
-  std::printf("\n");
-
-  std::uint32_t i;
-  for (i = 0; i < bufferCI.size; i += 4) {
-    std::printf("%4d:  %04x %04x %04x %04x\n", i, stagingData[i + 0],
-                stagingData[i + 1], stagingData[i + 2], stagingData[i + 3]);
-  }
-  if (i < bufferCI.size) {
-    std::printf("%4d:  ", i);
-    while (i < bufferCI.size) std::printf("%04x ", stagingData[i]);
-    std::printf("\n");
-  }
-#endif
-
-  vmaUnmapMemory(sAllocator, stagingAllocation);
+  sShaderBindingTableGenerator.AddRayGen(0);
+  sShaderBindingTableGenerator.AddMiss(1);
+  sShaderBindingTableGenerator.AddHitGroup(
+    2, gsl::make_span(reinterpret_cast<std::byte*>(sSpheres.data()),
+                      sSpheres.size() * sizeof(Sphere)));
 
   char objectName[] = "sShaderBindingTable";
 
-  bufferCI.usage =
-    VK_BUFFER_USAGE_RAY_TRACING_BIT_NV | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  VkBufferCreateInfo bufferCI = {};
+  bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferCI.size =
+    sShaderBindingTableGenerator.ComputeSize(sShaderGroupHandleSize);
+  bufferCI.usage = VK_BUFFER_USAGE_RAY_TRACING_BIT_NV;
 
-  allocationCI = {};
+  VmaAllocationCreateInfo allocationCI = {};
   allocationCI.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
-  allocationCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+  allocationCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
   allocationCI.pUserData = objectName;
 
   if (auto result = vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI,
@@ -2118,26 +2015,16 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
       std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
   }
 
-  auto commandBuffer = BeginOneTimeSubmit();
-  if (!commandBuffer) {
+  VmaAllocationInfo info;
+  vmaGetAllocationInfo(sAllocator, sShaderBindingTableAllocation, &info);
+
+  if (auto result = sShaderBindingTableGenerator.Generate(
+        sDevice, sPipeline, sShaderBindingTable, info.deviceMemory);
+      result != VK_SUCCESS) {
     LOG_LEAVE();
-    return tl::unexpected(commandBuffer.error());
+    return tl::unexpected(std::system_error(
+      vk::make_error_code(result), "ShaderBindingTableGenerator::Generate"));
   }
-
-  VkBufferCopy region = {};
-  region.srcOffset = 0;
-  region.dstOffset = 0;
-  region.size = bufferCI.size;
-
-  vkCmdCopyBuffer(*commandBuffer, stagingBuffer, sShaderBindingTable, 1,
-                  &region);
-
-  if (auto result = EndOneTimeSubmit(*commandBuffer); !result) {
-    LOG_LEAVE();
-    return tl::unexpected(result.error());
-  }
-
-  vmaDestroyBuffer(sAllocator, stagingBuffer, stagingAllocation);
 
   Ensures(sShaderBindingTable != VK_NULL_HANDLE);
   Ensures(sShaderBindingTableAllocation != VK_NULL_HANDLE);
@@ -2386,27 +2273,22 @@ static tl::expected<void, std::system_error> Draw() noexcept {
     0, gsl::narrow_cast<std::uint32_t>(sDescriptorSets.size()),
     sDescriptorSets.data(), 0, nullptr);
 
-  VkDeviceSize rayGenOffset = 0;
-  VkDeviceSize missOffset = sShaderGroupHandleSize;
-  VkDeviceSize missStride = sShaderGroupHandleSize;
-  VkDeviceSize hitGroupOffset = missOffset + missStride;
-  VkDeviceSize hitGroupStride = sShaderGroupHandleSize + sizeof(Sphere);
-
-  vkCmdTraceRaysNV(frame.commandBuffer,
-                   sShaderBindingTable,     // raygenShaderBindingTableBuffer
-                   rayGenOffset,            // raygenShaderBindingOffset
-                   sShaderBindingTable,     // missShaderBindingTableBuffer
-                   missOffset,              // missShaderBindingOffset
-                   missStride,              // missShaderBindingStride
-                   sShaderBindingTable,     // hitShaderBindingTableBuffer
-                   hitGroupOffset,          // hitShaderBindingOffset
-                   hitGroupStride,          // hitShaderBindingStride
-                   VK_NULL_HANDLE,          // callableShaderBindingTableBuffer
-                   0,                       // callableShaderBindingOffset
-                   0,                       // callableShaderBindingStride
-                   sSwapchainExtent.width,  // width
-                   sSwapchainExtent.height, // height
-                   1                        // depth
+  vkCmdTraceRaysNV(
+    frame.commandBuffer,
+    sShaderBindingTable,                       // raygenShaderBindingTableBuffer
+    0,                                         // raygenShaderBindingOffset
+    sShaderBindingTable,                       // missShaderBindingTableBuffer
+    sShaderBindingTableGenerator.MissOffset(), // missShaderBindingOffset
+    sShaderBindingTableGenerator.MissStride(), // missShaderBindingStride
+    sShaderBindingTable,                       // hitShaderBindingTableBuffer
+    sShaderBindingTableGenerator.HitGroupOffset(), // hitShaderBindingOffset
+    sShaderBindingTableGenerator.HitGroupStride(), // hitShaderBindingStride
+    VK_NULL_HANDLE,          // callableShaderBindingTableBuffer
+    0,                       // callableShaderBindingOffset
+    0,                       // callableShaderBindingStride
+    sSwapchainExtent.width,  // width
+    sSwapchainExtent.height, // height
+    1                        // depth
   );
 
   VkImageMemoryBarrier tracedBarrier = {};
