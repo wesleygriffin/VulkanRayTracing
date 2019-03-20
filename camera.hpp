@@ -24,7 +24,7 @@ public:
     update();
   }
 
-  void scale(float scale) noexcept {
+  void translate(float scale) noexcept {
     eye_ = eye_ + (lookAt_ - eye_) * scale;
     update();
   }
@@ -80,7 +80,7 @@ private:
   void calculateFrame() noexcept {
     w_ = lookAt_ - eye_;
     u_ = glm::normalize(glm::cross(w_, viewUp_));
-    v_ = glm::cross(u_, w_);
+    v_ = glm::normalize(glm::cross(u_, w_));
 
     float const len = glm::length(w_) * std::tan(.5f * vfov_);
     v_ *= len;

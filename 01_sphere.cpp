@@ -69,7 +69,7 @@ static constexpr std::uint32_t const kWindowHeight = 1200;
 static Camera sCamera(90.f,
                       static_cast<float>(kWindowWidth) /
                         static_cast<float>(kWindowHeight),
-                      glm::vec3(0.f, 0.f, 0.f), glm::vec3(0.f, 0.f, -1.f),
+                      glm::vec3(0.f, 0.f, 1.f), glm::vec3(0.f, 0.f, 0.f),
                       glm::vec3(0.f, 1.f, 0.f));
 static Arcball sArcball;
 
@@ -161,8 +161,8 @@ struct Sphere {
 }; // struct Spheres
 
 static std::array<Sphere, 2> sSpheres = {
-  Sphere(glm::vec3(0.f, 0.f, -1.f), .5f),
-  Sphere(glm::vec3(0.f, -100.5f, -1.f), 100.f),
+  Sphere(glm::vec3(0.f, 0.f, 0.f), .5f),
+  Sphere(glm::vec3(0.f, -100.5f, 0.f), 100.f),
 };
 
 static VkBuffer sSpheresBuffer = VK_NULL_HANDLE;
@@ -203,7 +203,7 @@ static void CursorMoved(GLFWwindow*, double x, double y) {
     glm::vec2 const nDelta = delta / swapchainSize;
     float const max =
       std::abs(nDelta.x) > std::abs(nDelta.y) ? nDelta.x : nDelta.y;
-    sCamera.scale(std::min(max, 0.9f));
+    sCamera.translate(std::min(max, 0.9f));
   } else if (sLeftMouseButtonDown) {
     glm::vec2 const a = sPrevMousePos / swapchainSize;
     glm::vec2 const b = currMousePos / swapchainSize;
