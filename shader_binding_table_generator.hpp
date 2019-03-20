@@ -78,7 +78,7 @@ public:
   }
 
   VkResult Generate(VkDevice device, VkPipeline pipeline,
-                    VkDeviceMemory memory);
+                    gsl::not_null<std::byte*> pOutput);
 
   struct SBTEntry {
     std::uint32_t groupIndex;

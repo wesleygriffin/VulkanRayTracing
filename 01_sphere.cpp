@@ -2017,22 +2017,32 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
       std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
   }
 
+  std::byte* pStaging;
+  if (auto ptr = MapMemory<std::byte*>(sAllocator, stagingAllocation)) {
+    pStaging = *ptr;
+  } else {
+    LOG_LEAVE();
+    return tl::unexpected(ptr.error());
+  }
+
   VmaAllocationInfo info;
   vmaGetAllocationInfo(sAllocator, stagingAllocation, &info);
 
-  if (auto result = sShaderBindingTableGenerator.Generate(sDevice, sPipeline,
-                                                          info.deviceMemory);
+  if (auto result =
+        sShaderBindingTableGenerator.Generate(sDevice, sPipeline, pStaging);
       result != VK_SUCCESS) {
     LOG_LEAVE();
     return tl::unexpected(std::system_error(
       vk::make_error_code(result), "ShaderBindingTableGenerator::Generate"));
   }
 
+  vmaUnmapMemory(sAllocator, stagingAllocation);
+
   char objectName[] = "sShaderBindingTable";
 
   bufferCI.usage =
     VK_BUFFER_USAGE_RAY_TRACING_BIT_NV | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-  std::fprintf(stderr, "sShaderBindingTable size: %d\n", bufferCI.size);
+  std::fprintf(stderr, "sShaderBindingTable size: %zu\n", bufferCI.size);
 
   allocationCI.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
   allocationCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;

@@ -28,12 +28,11 @@ VkDeviceSize ShaderBindingTableGenerator::ComputeSize(
   return sbtSize_;
 } // ShaderBindingTableGenerator::ComputeSize
 
-VkResult ShaderBindingTableGenerator::Generate(VkDevice device,
-                                               VkPipeline pipeline,
-                                               VkDeviceMemory memory) {
+VkResult
+ShaderBindingTableGenerator::Generate(VkDevice device, VkPipeline pipeline,
+                                      gsl::not_null<std::byte*> pOutput) {
   Expects(device != VK_NULL_HANDLE);
   Expects(pipeline != VK_NULL_HANDLE);
-  Expects(memory != VK_NULL_HANDLE);
   Expects(shaderGroupHandleSize_ > 0);
   Expects(rayGenEntrySize_ >= 0);
   Expects(missEntrySize_ >= 0);
@@ -63,31 +62,24 @@ VkResult ShaderBindingTableGenerator::Generate(VkDevice device,
     return result;
   }
 
-  void* pBuffer;
-  if (auto result = vkMapMemory(device, memory, 0, sbtSize_, 0, &pBuffer);
-      result != VK_SUCCESS) {
-    return result;
-  }
-
   VkDeviceSize offset = 0;
   std::fprintf(stderr, "offset: %zu\n", offset);
 
-  offset += CopyShaderData(
-    device, pipeline, reinterpret_cast<std::byte*>(pBuffer) + offset,
-    rayGenEntries_, rayGenEntrySize_, shaderHandleStorage.data());
+  offset +=
+    CopyShaderData(device, pipeline, pOutput.get() + offset, rayGenEntries_,
+                   rayGenEntrySize_, shaderHandleStorage.data());
   std::fprintf(stderr, "offset: %zu\n", offset);
 
-  offset += CopyShaderData(
-    device, pipeline, reinterpret_cast<std::byte*>(pBuffer) + offset,
-    missEntries_, missEntrySize_, shaderHandleStorage.data());
+  offset +=
+    CopyShaderData(device, pipeline, pOutput.get() + offset, missEntries_,
+                   missEntrySize_, shaderHandleStorage.data());
   std::fprintf(stderr, "offset: %zu\n", offset);
 
-  offset += CopyShaderData(
-    device, pipeline, reinterpret_cast<std::byte*>(pBuffer) + offset,
-    hitGroupEntries_, hitGroupEntrySize_, shaderHandleStorage.data());
+  offset +=
+    CopyShaderData(device, pipeline, pOutput.get() + offset, hitGroupEntries_,
+                   hitGroupEntrySize_, shaderHandleStorage.data());
   std::fprintf(stderr, "offset: %zu\n", offset);
 
-  vkUnmapMemory(device, memory);
   return VK_SUCCESS;
 } // ShaderBindingTableGenerator::Generate
 
