@@ -1347,7 +1347,8 @@ CreateDescriptorSetLayout() noexcept {
   accelerationStructureLB.descriptorCount = 1;
   accelerationStructureLB.descriptorType =
     VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_NV;
-  accelerationStructureLB.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_NV;
+  accelerationStructureLB.stageFlags =
+    VK_SHADER_STAGE_RAYGEN_BIT_NV | VK_SHADER_STAGE_CLOSEST_HIT_BIT_NV;
 
   VkDescriptorSetLayoutBinding outputImageLB = {};
   outputImageLB.binding = 1;
@@ -1359,13 +1360,15 @@ CreateDescriptorSetLayout() noexcept {
   uniformBufferLB.binding = 2;
   uniformBufferLB.descriptorCount = 1;
   uniformBufferLB.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-  uniformBufferLB.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_NV;
+  uniformBufferLB.stageFlags =
+    VK_SHADER_STAGE_RAYGEN_BIT_NV | VK_SHADER_STAGE_CLOSEST_HIT_BIT_NV;
 
   VkDescriptorSetLayoutBinding spheresBufferLB = {};
   spheresBufferLB.binding = 3;
   spheresBufferLB.descriptorCount = 1;
   spheresBufferLB.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-  spheresBufferLB.stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_NV;
+  spheresBufferLB.stageFlags =
+    VK_SHADER_STAGE_INTERSECTION_BIT_NV | VK_SHADER_STAGE_CLOSEST_HIT_BIT_NV;
 
   std::array<VkDescriptorSetLayoutBinding, 4> bindings = {
     accelerationStructureLB, outputImageLB, uniformBufferLB, spheresBufferLB};
@@ -1515,7 +1518,7 @@ static tl::expected<void, std::system_error> CreatePipeline() noexcept {
   pipelineCI.pStages = stages.data();
   pipelineCI.groupCount = gsl::narrow_cast<std::uint32_t>(groups.size());
   pipelineCI.pGroups = groups.data();
-  pipelineCI.maxRecursionDepth = 1;
+  pipelineCI.maxRecursionDepth = 4;
   pipelineCI.layout = sPipelineLayout;
 
   if (auto result = vkCreateRayTracingPipelinesNV(
