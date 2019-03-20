@@ -29,6 +29,7 @@ using PFN_vkCmdCopyBuffer = decltype(vkCmdCopyBuffer);
 #include "vk_mem_alloc.h"
 // clang-format on
 
+#include "arcball.hpp"
 #include "camera.hpp"
 #include "expected.hpp"
 #include "glm/common.hpp"
@@ -63,16 +64,19 @@ using PFN_vkCmdCopyBuffer = decltype(vkCmdCopyBuffer);
 #endif
 
 static constexpr std::uint32_t const kWindowWidth = 1600;
-static constexpr std::uint32_t const kWindowHeight = 800;
+static constexpr std::uint32_t const kWindowHeight = 1200;
 
 static Camera sCamera(90.f,
                       static_cast<float>(kWindowWidth) /
                         static_cast<float>(kWindowHeight),
                       glm::vec3(0.f, 0.f, 0.f), glm::vec3(0.f, 0.f, -1.f),
                       glm::vec3(0.f, 1.f, 0.f));
+static Arcball sArcball;
 
-static void UpdateCamera() noexcept {
-} // UpdateCamera
+static bool sLeftMouseButtonDown = false;
+static bool sRightMouseButtonDown = false;
+static glm::vec2 sCurrMousePos = {0.f, 0.f};
+static glm::vec2 sPrevMousePos = {0.f, 0.f};
 
 static VkPhysicalDeviceFeatures2 sDeviceFeatures = {};
 
@@ -180,6 +184,35 @@ static VmaAllocation sShaderBindingTableAllocation = VK_NULL_HANDLE;
 
 static std::vector<VkDescriptorSet> sDescriptorSets;
 
+static void MouseButtonChanged(GLFWwindow*, int button, int action, int) {
+  if (button == GLFW_MOUSE_BUTTON_LEFT) {
+    sLeftMouseButtonDown = (action == GLFW_PRESS);
+  }
+  if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+    sRightMouseButtonDown = (action == GLFW_PRESS);
+  }
+} // MouseButtonChanged
+
+static void CursorMoved(GLFWwindow*, double x, double y) {
+  glm::vec2 const swapchainSize(sSwapchainExtent.width,
+                                sSwapchainExtent.height);
+  glm::vec2 const currMousePos(x, y);
+
+  if (sRightMouseButtonDown) {
+    glm::vec2 const delta = sPrevMousePos - currMousePos;
+    glm::vec2 const nDelta = delta / swapchainSize;
+    float const max =
+      std::abs(nDelta.x) > std::abs(nDelta.y) ? nDelta.x : nDelta.y;
+    sCamera.scale(std::min(max, 0.9f));
+  } else if (sLeftMouseButtonDown) {
+    glm::vec2 const a = sPrevMousePos / swapchainSize;
+    glm::vec2 const b = currMousePos / swapchainSize;
+    sCamera.rotate(sArcball.rotate(b, a));
+  }
+
+  sPrevMousePos = glm::vec2(x, y);
+} // CursorPosChanged
+
 template <class T>
 void NameObject(VkDevice device, VkObjectType objectType, T objectHandle,
                 gsl::czstring objectName) noexcept {
@@ -231,6 +264,8 @@ static tl::expected<void, std::system_error> InitWindow() noexcept {
                         "glfwCreateWindow: " + sErrorMessage));
   }
 
+  glfwSetMouseButtonCallback(sWindow, MouseButtonChanged);
+  glfwSetCursorPosCallback(sWindow, CursorMoved);
   glfwSetFramebufferSizeCallback(sWindow, FramebufferResized);
 
   Ensures(sWindow != nullptr);

@@ -23,6 +23,7 @@ add_custom_command(
 )
 
 set(COMMON_SOURCES
+  arcball.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/flextVk.cpp
   shader_binding_table_generator.cpp
 )
