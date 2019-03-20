@@ -121,6 +121,7 @@ static std::vector<VkFence> sFramesComplete;
 static VkSemaphore sRenderFinished = VK_NULL_HANDLE;
 
 static VkDescriptorPool sDescriptorPool = VK_NULL_HANDLE;
+static VkQueryPool sQueryPool = VK_NULL_HANDLE;
 
 static VkDescriptorSetLayout sDescriptorSetLayout = VK_NULL_HANDLE;
 static VkPipelineLayout sPipelineLayout = VK_NULL_HANDLE;
@@ -1276,6 +1277,31 @@ static tl::expected<void, std::system_error> CreateDescriptorPool() noexcept {
   return {};
 } // CreateDescriptorPool
 
+static tl::expected<void, std::system_error> CreateQueryPool() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+
+  VkQueryPoolCreateInfo queryPoolCI = {};
+  queryPoolCI.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+  queryPoolCI.queryType = VK_QUERY_TYPE_TIMESTAMP;
+  queryPoolCI.queryCount = 32;
+
+  if (auto result =
+        vkCreateQueryPool(sDevice, &queryPoolCI, nullptr, &sQueryPool);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vkCreateQueryPool"));
+  }
+
+  NameObject(sDevice, VK_OBJECT_TYPE_QUERY_POOL, sQueryPool, "sQueryPool");
+
+  Ensures(sQueryPool != VK_NULL_HANDLE);
+
+  LOG_LEAVE();
+  return {};
+} // CreateQueryPool
+
 static tl::expected<void, std::system_error>
 CreateDescriptorSetLayout() noexcept {
   LOG_ENTER();
@@ -2003,7 +2029,9 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
 
   vkGetPhysicalDeviceProperties2(sPhysicalDevice, &props);
   sShaderGroupHandleSize = rtProps.shaderGroupHandleSize;
+#ifndef NDEBUG
   std::fprintf(stderr, "sShaderGroupHandleSize: %d\n", sShaderGroupHandleSize);
+#endif
 
   sShaderBindingTableGenerator.AddRayGen(0);
   sShaderBindingTableGenerator.AddMiss(1);
@@ -2055,7 +2083,9 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
 
   bufferCI.usage =
     VK_BUFFER_USAGE_RAY_TRACING_BIT_NV | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+#ifndef NDEBUG
   std::fprintf(stderr, "sShaderBindingTable size: %zu\n", bufferCI.size);
+#endif
 
   allocationCI.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
   allocationCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
@@ -2327,6 +2357,10 @@ static tl::expected<void, std::system_error> Draw() noexcept {
 
   vkBeginCommandBuffer(frame.commandBuffer, &commandBufferBI);
 
+  vkCmdResetQueryPool(frame.commandBuffer, sQueryPool, 0, 32);
+  vkCmdWriteTimestamp(frame.commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                      sQueryPool, 0);
+
   VkImageSubresourceRange sr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
   VkImageMemoryBarrier readyBarrier = {};
@@ -2351,6 +2385,10 @@ static tl::expected<void, std::system_error> Draw() noexcept {
     0, gsl::narrow_cast<std::uint32_t>(sDescriptorSets.size()),
     sDescriptorSets.data(), 0, nullptr);
 
+  vkCmdWriteTimestamp(frame.commandBuffer,
+                      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_NV, sQueryPool,
+                      2);
+
   vkCmdTraceRaysNV(
     frame.commandBuffer,
     sShaderBindingTable,                       // raygenShaderBindingTableBuffer
@@ -2368,6 +2406,10 @@ static tl::expected<void, std::system_error> Draw() noexcept {
     sSwapchainExtent.height, // height
     1                        // depth
   );
+
+  vkCmdWriteTimestamp(frame.commandBuffer,
+                      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_NV, sQueryPool,
+                      3);
 
   VkImageMemoryBarrier tracedBarrier = {};
   tracedBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -2419,6 +2461,9 @@ static tl::expected<void, std::system_error> Draw() noexcept {
   vkCmdPipelineBarrier(frame.commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
                        nullptr, 1, &barrier);
+
+  vkCmdWriteTimestamp(frame.commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                      sQueryPool, 1);
 
   vkEndCommandBuffer(frame.commandBuffer);
 
@@ -2473,6 +2518,7 @@ int main() {
     .and_then(CreateSwapchainImagesAndViews)
     .and_then(CreateFramebuffers)
     .and_then(CreateDescriptorPool)
+    .and_then(CreateQueryPool)
     .and_then(CreateDescriptorSetLayout)
     .and_then(CreatePipeline)
     .and_then(CreateUniformBuffer)
@@ -2514,8 +2560,25 @@ int main() {
     now = glfwGetTime();
 
     if (frameCount % 100 == 0) {
+      std::array<std::uint64_t, 4> queries;
+      if (auto result = vkGetQueryPoolResults(
+            sDevice, sQueryPool, 0,
+            gsl::narrow_cast<std::uint32_t>(queries.size()),
+            queries.size() * sizeof(std::uint64_t), queries.data(),
+            sizeof(std::uint64_t),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+          result != VK_SUCCESS) {
+        std::fprintf(stderr, "Cannot get query results: %s\n",
+                     vk::to_string(result));
+      }
+
+      std::printf("current frame:\n");
+      std::printf("  pipe : %2.5g ms\n",
+                  (queries[1] - queries[0]) * 1e-06);
+      std::printf("  trace: %2.5g ms\n", (queries[3] - queries[2]) * 1e-06);
+
       double const delta = now - last;
-      std::printf("%2.5g ms\n", delta * 1000.0);
+      std::printf("  delta: %2.5g ms\n", delta * 1000.0);
     }
 
     last = now;

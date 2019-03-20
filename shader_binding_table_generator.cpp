@@ -39,6 +39,10 @@ ShaderBindingTableGenerator::Generate(VkDevice device, VkPipeline pipeline,
   Expects(hitGroupEntrySize_ >= 0);
   Expects(sbtSize_ > 0);
 
+  std::uint32_t const groupCount = gsl::narrow_cast<std::uint32_t>(
+    rayGenEntries_.size() + missEntries_.size() + hitGroupEntries_.size());
+
+#ifndef NDEBUG
   std::fprintf(stderr, "RayGenStride: %zu\n", RayGenStride());
   std::fprintf(stderr, "RayGenSize: %zu\n", RayGenSize());
   std::fprintf(stderr, "MissOffset: %zu\n", MissOffset());
@@ -48,10 +52,9 @@ ShaderBindingTableGenerator::Generate(VkDevice device, VkPipeline pipeline,
   std::fprintf(stderr, "HitGroupStride: %zu\n", HitGroupStride());
   std::fprintf(stderr, "HitGroupSize: %zu\n", HitGroupSize());
 
-  std::uint32_t const groupCount = gsl::narrow_cast<std::uint32_t>(
-    rayGenEntries_.size() + missEntries_.size() + hitGroupEntries_.size());
   std::fprintf(stderr, "groupCount: %d shaderGroupHandleSize_: %zu\n",
                groupCount, shaderGroupHandleSize_);
+#endif
 
   std::vector<std::byte> shaderHandleStorage(groupCount *
                                              shaderGroupHandleSize_);
@@ -63,22 +66,30 @@ ShaderBindingTableGenerator::Generate(VkDevice device, VkPipeline pipeline,
   }
 
   VkDeviceSize offset = 0;
+#ifndef NDEBUG
   std::fprintf(stderr, "offset: %zu\n", offset);
+#endif
 
   offset +=
     CopyShaderData(device, pipeline, pOutput.get() + offset, rayGenEntries_,
                    rayGenEntrySize_, shaderHandleStorage.data());
+#ifndef NDEBUG
   std::fprintf(stderr, "offset: %zu\n", offset);
+#endif
 
   offset +=
     CopyShaderData(device, pipeline, pOutput.get() + offset, missEntries_,
                    missEntrySize_, shaderHandleStorage.data());
+#ifndef NDEBUG
   std::fprintf(stderr, "offset: %zu\n", offset);
+#endif
 
   offset +=
     CopyShaderData(device, pipeline, pOutput.get() + offset, hitGroupEntries_,
                    hitGroupEntrySize_, shaderHandleStorage.data());
+#ifndef NDEBUG
   std::fprintf(stderr, "offset: %zu\n", offset);
+#endif
 
   return VK_SUCCESS;
 } // ShaderBindingTableGenerator::Generate
@@ -108,11 +119,13 @@ VkDeviceSize ShaderBindingTableGenerator::CopyShaderData(
                   shader.groupIndex * shaderGroupHandleSize_,
                 shaderGroupHandleSize_);
 
+#ifndef NDEBUG
     std::fprintf(stderr, "groupIndex: %d handle: 0x", shader.groupIndex);
     for (int i = 0; i < shaderGroupHandleSize_; ++i) {
       std::fprintf(stderr, "%0x", pData[i]);
     }
     std::fprintf(stderr, "\n");
+#endif
 
     if (!shader.inlineData.empty()) {
       std::memcpy(pData + shaderGroupHandleSize_, shader.inlineData.data(),
