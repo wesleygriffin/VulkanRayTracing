@@ -34,6 +34,7 @@ using PFN_vkCmdCopyBuffer = decltype(vkCmdCopyBuffer);
 #include "glm/common.hpp"
 #include "glm/mat4x4.hpp"
 #include "glm/gtc/matrix_transform.hpp"
+#include "glm/gtc/type_ptr.hpp"
 #include "gsl/gsl-lite.hpp"
 #include "shader_binding_table_generator.hpp"
 #include "vk_result.hpp"
@@ -68,44 +69,10 @@ static Camera sCamera(90.f,
                       static_cast<float>(kWindowWidth) /
                         static_cast<float>(kWindowHeight),
                       glm::vec3(0.f, 0.f, 0.f), glm::vec3(0.f, 0.f, -1.f),
-                      glm::vec3(0.f, -1.f, 0.f));
+                      glm::vec3(0.f, 1.f, 0.f));
 
 static void UpdateCamera() noexcept {
 } // UpdateCamera
-
-struct AABB {
-  glm::vec3 min;
-  glm::vec3 max;
-
-  AABB(glm::vec3 p, glm::vec3 q)
-  noexcept
-    : min(std::move(p))
-    , max(std::move(q)) {}
-}; // struct AABB
-
-struct Sphere {
-  glm::vec4 centerRadius;
-
-  Sphere(glm::vec3 c, float r) noexcept
-    : centerRadius(std::move(c), r) {}
-
-  AABB aabb() const noexcept {
-    return AABB(glm::vec3(centerRadius.x, centerRadius.y, centerRadius.z) -
-                  centerRadius.w,
-                glm::vec3(centerRadius.x, centerRadius.y, centerRadius.z) +
-                  centerRadius.w);
-  }
-}; // struct Spheres
-
-static std::array<Sphere, 2> sSpheres = {
-  Sphere(glm::vec3(0.f, 0.f, -1.f), .5f),
-  Sphere(glm::vec3(0.f, -100.5f, -1.f), 100.f),
-};
-
-static std::array<AABB, 2> sAABBs = {
-  sSpheres[0].aabb(),
-  sSpheres[1].aabb(),
-};
 
 static VkPhysicalDeviceFeatures2 sDeviceFeatures = {};
 
@@ -172,6 +139,29 @@ static VmaAllocation sUniformBufferAllocation = VK_NULL_HANDLE;
 static VkImage sOutputImage = VK_NULL_HANDLE;
 static VmaAllocation sOutputImageAllocation = VK_NULL_HANDLE;
 static VkImageView sOutputImageView = VK_NULL_HANDLE;
+
+struct Sphere {
+  glm::vec3 aabbMin;
+  glm::vec3 aabbMax;
+
+  Sphere(glm::vec3 center, float radius) noexcept
+    : aabbMin(center - glm::vec3(radius))
+    , aabbMax(center + glm::vec3(radius)) {}
+
+  glm::vec3 center() const noexcept {
+    return (aabbMax + aabbMin) / glm::vec3(2.f);
+  }
+
+  float radius() const noexcept { return (aabbMax.x - aabbMin.x) / 2.f; }
+}; // struct Spheres
+
+static std::array<Sphere, 2> sSpheres = {
+  Sphere(glm::vec3(0.f, 0.f, -1.f), .5f),
+  Sphere(glm::vec3(0.f, -100.5f, -1.f), 100.f),
+};
+
+static VkBuffer sSpheresBuffer = VK_NULL_HANDLE;
+static VmaAllocation sSpheresBufferAllocation = VK_NULL_HANDLE;
 
 static VkAccelerationStructureNV sBottomLevelAccelerationStructure =
   VK_NULL_HANDLE;
@@ -1256,10 +1246,11 @@ static tl::expected<void, std::system_error> CreateDescriptorPool() noexcept {
   LOG_ENTER();
   Expects(sDevice != VK_NULL_HANDLE);
 
-  std::array<VkDescriptorPoolSize, 3> poolSizes = {
+  std::array<VkDescriptorPoolSize, 4> poolSizes = {
     VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_NV, 1},
     VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
-    VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}};
+    VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1},
+    VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}};
 
   VkDescriptorPoolCreateInfo descriptorPoolCI = {};
   descriptorPoolCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1309,8 +1300,14 @@ CreateDescriptorSetLayout() noexcept {
   uniformBufferLB.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   uniformBufferLB.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_NV;
 
-  std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
-    accelerationStructureLB, outputImageLB, uniformBufferLB};
+  VkDescriptorSetLayoutBinding spheresBufferLB = {};
+  spheresBufferLB.binding = 3;
+  spheresBufferLB.descriptorCount = 1;
+  spheresBufferLB.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  spheresBufferLB.stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_NV;
+
+  std::array<VkDescriptorSetLayoutBinding, 4> bindings = {
+    accelerationStructureLB, outputImageLB, uniformBufferLB, spheresBufferLB};
 
   VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCI = {};
   descriptorSetLayoutCI.sType =
@@ -1577,82 +1574,104 @@ static tl::expected<void, std::system_error> CreateOutputImage() noexcept {
 } // CreateOutputImage
 
 static tl::expected<void, std::system_error>
-CreateBottomLevelAccelerationStructures() noexcept {
+CreateSpheresBuffer() noexcept {
   LOG_ENTER();
   Expects(sDevice != VK_NULL_HANDLE);
   Expects(sAllocator != VK_NULL_HANDLE);
 
-  VkBuffer aabbBuffer;
-  VmaAllocation aabbBufferAllocation;
-
   VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bufferCI.size = sizeof(AABB) * sAABBs.size();
-  bufferCI.usage = VK_BUFFER_USAGE_RAY_TRACING_BIT_NV;
+  bufferCI.size = sSpheres.size() * sizeof(Sphere);
+  bufferCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
   VmaAllocationCreateInfo allocationCI = {};
   allocationCI.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
 
+  VkBuffer stagingBuffer;
+  VmaAllocation stagingAllocation;
+
   if (auto result =
-        vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI, &aabbBuffer,
-                        &aabbBufferAllocation, nullptr);
+        vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI, &stagingBuffer,
+                        &stagingAllocation, nullptr);
       result != VK_SUCCESS) {
     LOG_LEAVE();
     return tl::unexpected(
       std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
   }
 
-  AABB* aabbData;
-  if (auto ptr = MapMemory<AABB*>(sAllocator, aabbBufferAllocation)) {
-    aabbData = *ptr;
+  Sphere* pStaging;
+  if (auto ptr = MapMemory<Sphere*>(sAllocator, stagingAllocation)) {
+    pStaging = *ptr;
   } else {
     LOG_LEAVE();
     return tl::unexpected(ptr.error());
   }
 
-  std::memcpy(aabbData, sAABBs.data(), sizeof(AABB) * sAABBs.size());
-  vmaUnmapMemory(sAllocator, aabbBufferAllocation);
+  std::memcpy(pStaging, sSpheres.data(), sSpheres.size() * sizeof(Sphere));
+  vmaUnmapMemory(sAllocator, stagingAllocation);
+
+  char objectName[] = "sSpheresBuffer";
+
+  bufferCI.usage =
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+  allocationCI.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
+  allocationCI.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+  allocationCI.pUserData = objectName;
+
+  if (auto result =
+        vmaCreateBuffer(sAllocator, &bufferCI, &allocationCI, &sSpheresBuffer,
+                        &sSpheresBufferAllocation, nullptr);
+      result != VK_SUCCESS) {
+    LOG_LEAVE();
+    return tl::unexpected(
+      std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
+  }
+
+  auto commandBuffer = BeginOneTimeSubmit();
+  if (!commandBuffer) {
+    LOG_LEAVE();
+    return tl::unexpected(commandBuffer.error());
+  }
+
+  VkBufferCopy region = {};
+  region.srcOffset = 0;
+  region.dstOffset = 0;
+  region.size = bufferCI.size;
+
+  vkCmdCopyBuffer(*commandBuffer, stagingBuffer, sSpheresBuffer, 1, &region);
+
+  if (auto result = EndOneTimeSubmit(*commandBuffer); !result) {
+    LOG_LEAVE();
+    return tl::unexpected(result.error());
+  }
+
+  LOG_LEAVE();
+  return {};
+} // CreateSpheresBuffer
+
+static tl::expected<void, std::system_error>
+CreateBottomLevelAccelerationStructure() noexcept {
+  LOG_ENTER();
+  Expects(sDevice != VK_NULL_HANDLE);
+  Expects(sAllocator != VK_NULL_HANDLE);
 
   VkGeometryTrianglesNV triangles = {};
   triangles.sType = VK_STRUCTURE_TYPE_GEOMETRY_TRIANGLES_NV;
 
-  std::array<VkGeometryNV, 2> geometries;
+  VkGeometryAABBNV spheres = {};
+  spheres.sType = VK_STRUCTURE_TYPE_GEOMETRY_AABB_NV;
+  spheres.aabbData = sSpheresBuffer;
+  spheres.numAABBs = gsl::narrow_cast<std::uint32_t>(sSpheres.size());
+  spheres.stride = sizeof(Sphere);
+  spheres.offset = offsetof(Sphere, aabbMin);
 
-  geometries[0] = {
-    VK_STRUCTURE_TYPE_GEOMETRY_NV, // sType
-    nullptr,                       // pNext
-    VK_GEOMETRY_TYPE_AABBS_NV,     // geometryType
-    {
-      triangles,
-      {
-        VK_STRUCTURE_TYPE_GEOMETRY_AABB_NV, // sType
-        nullptr,                            // pNext
-        aabbBuffer,                         // aabbData
-        1,                                  // numAABBs
-        sizeof(AABB),                       // stride
-        0                                   // offset
-      }                                     // aabb
-    },                                      // geometry
-    VK_GEOMETRY_OPAQUE_BIT_NV               // flags
-  };
-
-  geometries[1] = {
-    VK_STRUCTURE_TYPE_GEOMETRY_NV, // sType
-    nullptr,                       // pNext
-    VK_GEOMETRY_TYPE_AABBS_NV,     // geometryType
-    {
-      triangles,
-      {
-        VK_STRUCTURE_TYPE_GEOMETRY_AABB_NV, // sType
-        nullptr,                            // pNext
-        aabbBuffer,                         // aabbData
-        1,                                  // numAABBs
-        sizeof(AABB),                       // stride
-        sizeof(AABB)                        // offset
-      }                                     // aabb
-    },                                      // geometry
-    VK_GEOMETRY_OPAQUE_BIT_NV               // flags
-  };
+  VkGeometryNV geometry = {};
+  geometry.sType = VK_STRUCTURE_TYPE_GEOMETRY_NV;
+  geometry.geometryType = VK_GEOMETRY_TYPE_AABBS_NV;
+  geometry.geometry.triangles = triangles;
+  geometry.geometry.aabbs = spheres;
+  geometry.flags = VK_GEOMETRY_OPAQUE_BIT_NV;
 
   VkAccelerationStructureCreateInfoNV accelerationStructureCI = {};
   accelerationStructureCI.sType =
@@ -1664,9 +1683,8 @@ CreateBottomLevelAccelerationStructures() noexcept {
     VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_NV;
   accelerationStructureCI.info.flags = 0;
   accelerationStructureCI.info.instanceCount = 0;
-  accelerationStructureCI.info.geometryCount =
-    gsl::narrow_cast<std::uint32_t>(geometries.size());
-  accelerationStructureCI.info.pGeometries = geometries.data();
+  accelerationStructureCI.info.geometryCount = 1;
+  accelerationStructureCI.info.pGeometries = &geometry;
 
   if (auto result = vkCreateAccelerationStructureNV(
         sDevice, &accelerationStructureCI, nullptr,
@@ -1695,7 +1713,7 @@ CreateBottomLevelAccelerationStructures() noexcept {
 
   char objectName[] = "sBottomLevelAccelerationStructureAllocation";
 
-  allocationCI = {};
+  VmaAllocationCreateInfo allocationCI = {};
   allocationCI.flags = VMA_ALLOCATION_CREATE_USER_DATA_COPY_STRING_BIT;
   allocationCI.usage = VMA_MEMORY_USAGE_UNKNOWN;
   allocationCI.pUserData = objectName;
@@ -1739,7 +1757,7 @@ CreateBottomLevelAccelerationStructures() noexcept {
   VkBuffer scratchBuffer;
   VmaAllocation scratchAllocation;
 
-  bufferCI = {};
+  VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
   bufferCI.size = bottomLevelMemReq.memoryRequirements.size;
   bufferCI.usage = VK_BUFFER_USAGE_RAY_TRACING_BIT_NV;
@@ -1773,14 +1791,12 @@ CreateBottomLevelAccelerationStructures() noexcept {
     return tl::unexpected(result.error());
   }
 
-  vmaDestroyBuffer(sAllocator, aabbBuffer, aabbBufferAllocation);
-
   Ensures(sBottomLevelAccelerationStructure != VK_NULL_HANDLE);
   Ensures(sBottomLevelAccelerationStructureAllocation != VK_NULL_HANDLE);
 
   LOG_LEAVE();
   return {};
-} // CreateBottomLevelAccelerationStructures
+} // CreateBottomLevelAccelerationStructure
 
 static tl::expected<void, std::system_error>
 CreateTopLevelAccelerationStructure() noexcept {
@@ -1857,22 +1873,31 @@ CreateTopLevelAccelerationStructure() noexcept {
       vk::make_error_code(result), "vkBindAccelerationStructureMemoryNV"));
   }
 
-  std::array<std::byte, 8> bottomLevelHandle;
+  std::uint64_t bottomLevelHandle;
   if (auto result = vkGetAccelerationStructureHandleNV(
-        sDevice, sBottomLevelAccelerationStructure, bottomLevelHandle.size(),
-        bottomLevelHandle.data());
+        sDevice, sBottomLevelAccelerationStructure, sizeof(bottomLevelHandle),
+        &bottomLevelHandle);
       result != VK_SUCCESS) {
     LOG_LEAVE();
     return tl::unexpected(std::system_error(
       vk::make_error_code(result), "vkGetAccelerationStructureHandleNV"));
   }
 
+  struct VkGeometryInstanceNV {
+    float transform[12];
+    std::uint32_t instanceCustomIndex : 24;
+    std::uint32_t mask : 8;
+    std::uint32_t instanceOffset : 24;
+    std::uint32_t flags : 8;
+    std::uint64_t accelerationStructureHandle;
+  };
+
   VkBuffer instanceBuffer;
   VmaAllocation instanceAllocation;
 
   VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bufferCI.size = 64;
+  bufferCI.size = sizeof(VkGeometryInstanceNV);
   bufferCI.usage = VK_BUFFER_USAGE_RAY_TRACING_BIT_NV;
 
   allocationCI = {};
@@ -1887,15 +1912,6 @@ CreateTopLevelAccelerationStructure() noexcept {
       std::system_error(vk::make_error_code(result), "vmaCreateBuffer"));
   }
 
-  struct VkGeometryInstanceNV {
-    float transform[12];
-    std::uint32_t instanceCustomIndex : 24;
-    std::uint32_t mask : 8;
-    std::uint32_t instanceOffset : 24;
-    std::uint32_t flags : 8;
-    std::uint64_t accelerationStructureHandle;
-  };
-
   VkGeometryInstanceNV* instanceData;
   if (auto ptr =
         MapMemory<VkGeometryInstanceNV*>(sAllocator, instanceAllocation)) {
@@ -1905,13 +1921,14 @@ CreateTopLevelAccelerationStructure() noexcept {
     return tl::unexpected(ptr.error());
   }
 
-  std::memset(instanceData, sizeof(VkGeometryInstanceNV), 0);
-  instanceData->transform[0] = instanceData->transform[5] =
-    instanceData->transform[10] = 1.f;
+  glm::mat4 transform = glm::mat4(1.f);
+
+  std::memcpy(instanceData->transform, glm::value_ptr(transform),
+              sizeof(transform));
+  instanceData->instanceCustomIndex = 0;
   instanceData->mask = 0xF;
   instanceData->instanceOffset = 0;
-  instanceData->accelerationStructureHandle =
-    *reinterpret_cast<std::uint64_t*>(bottomLevelHandle.data());
+  instanceData->accelerationStructureHandle = bottomLevelHandle;
 
   vmaUnmapMemory(sAllocator, instanceAllocation);
 
@@ -1990,11 +2007,7 @@ static tl::expected<void, std::system_error> CreateShaderBindingTable() noexcept
 
   sShaderBindingTableGenerator.AddRayGen(0);
   sShaderBindingTableGenerator.AddMiss(1);
-  sShaderBindingTableGenerator.AddHitGroup(
-    2, gsl::make_span(reinterpret_cast<std::byte*>(sSpheres.data()),
-                      sSpheres.size() * sizeof(Sphere)));
-  std::fprintf(stderr, "hit group data size: %zu\n",
-               sSpheres.size() * sizeof(Sphere));
+  sShaderBindingTableGenerator.AddHitGroup(2);
 
   VkBufferCreateInfo bufferCI = {};
   bufferCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -2093,6 +2106,7 @@ static tl::expected<void, std::system_error> CreateDescriptorSets() noexcept {
   Expects(sTopLevelAccelerationStructure != VK_NULL_HANDLE);
   Expects(sUniformBuffer != VK_NULL_HANDLE);
   Expects(sOutputImage != VK_NULL_HANDLE);
+  Expects(sSpheresBuffer != VK_NULL_HANDLE);
 
   sDescriptorSets.resize(1);
 
@@ -2118,16 +2132,21 @@ static tl::expected<void, std::system_error> CreateDescriptorSets() noexcept {
   accelerationStructureInfo.pAccelerationStructures =
     &sTopLevelAccelerationStructure;
 
-  VkDescriptorImageInfo imageInfo = {};
-  imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-  imageInfo.imageView = sOutputImageView;
+  VkDescriptorImageInfo outputImageInfo = {};
+  outputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  outputImageInfo.imageView = sOutputImageView;
 
-  VkDescriptorBufferInfo bufferInfo = {};
-  bufferInfo.buffer = sUniformBuffer;
-  bufferInfo.offset = 0;
-  bufferInfo.range = sizeof(UniformBuffer);
+  VkDescriptorBufferInfo uniformBufferInfo = {};
+  uniformBufferInfo.buffer = sUniformBuffer;
+  uniformBufferInfo.offset = 0;
+  uniformBufferInfo.range = sizeof(UniformBuffer);
 
-  std::array<VkWriteDescriptorSet, 3> writeDescriptorSets;
+  VkDescriptorBufferInfo spheresBufferInfo = {};
+  spheresBufferInfo.buffer = sSpheresBuffer;
+  spheresBufferInfo.offset = 0;
+  spheresBufferInfo.range = sizeof(Sphere) * sSpheres.size();
+
+  std::array<VkWriteDescriptorSet, 4> writeDescriptorSets;
 
   writeDescriptorSets[0] = {};
   writeDescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2144,16 +2163,23 @@ static tl::expected<void, std::system_error> CreateDescriptorSets() noexcept {
   writeDescriptorSets[1].dstBinding = 1;
   writeDescriptorSets[1].descriptorCount = 1;
   writeDescriptorSets[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-  writeDescriptorSets[1].pImageInfo = &imageInfo;
+  writeDescriptorSets[1].pImageInfo = &outputImageInfo;
 
   writeDescriptorSets[2] = {};
   writeDescriptorSets[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-  writeDescriptorSets[2].pNext = &accelerationStructureInfo;
   writeDescriptorSets[2].dstSet = sDescriptorSets[0];
   writeDescriptorSets[2].dstBinding = 2;
   writeDescriptorSets[2].descriptorCount = 1;
   writeDescriptorSets[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-  writeDescriptorSets[2].pBufferInfo = &bufferInfo;
+  writeDescriptorSets[2].pBufferInfo = &uniformBufferInfo;
+
+  writeDescriptorSets[3] = {};
+  writeDescriptorSets[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  writeDescriptorSets[3].dstSet = sDescriptorSets[0];
+  writeDescriptorSets[3].dstBinding = 3;
+  writeDescriptorSets[3].descriptorCount = 1;
+  writeDescriptorSets[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  writeDescriptorSets[3].pBufferInfo = &spheresBufferInfo;
 
   vkUpdateDescriptorSets(
     sDevice, gsl::narrow_cast<std::uint32_t>(writeDescriptorSets.size()),
@@ -2451,7 +2477,8 @@ int main() {
     .and_then(CreatePipeline)
     .and_then(CreateUniformBuffer)
     .and_then(CreateOutputImage)
-    .and_then(CreateBottomLevelAccelerationStructures)
+    .and_then(CreateSpheresBuffer)
+    .and_then(CreateBottomLevelAccelerationStructure)
     .and_then(CreateTopLevelAccelerationStructure)
     .and_then(CreateShaderBindingTable)
     .and_then(CreateDescriptorSets)

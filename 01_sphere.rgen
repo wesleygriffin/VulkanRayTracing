@@ -1,7 +1,7 @@
 #version 460 core
 #extension GL_NV_ray_tracing : require
 
-layout(set = 0, binding = 0) uniform accelerationStructureNV topLevelAS;
+layout(set = 0, binding = 0) uniform accelerationStructureNV scene;
 layout(set = 0, binding = 1, rgba8) uniform image2D image;
 
 layout(set = 0, binding = 2) uniform Camera {
@@ -11,24 +11,22 @@ layout(set = 0, binding = 2) uniform Camera {
   vec4 W;
 } camera;
 
-layout(shaderRecordNV) buffer Sphere {
-  vec4 centerRadius;
-} sphere;
-
 layout(location = 0) rayPayloadNV vec3 hitValue;
 
 void main() {
-  const vec2 d = vec2(gl_LaunchIDNV.xy) / vec2(gl_LaunchSizeNV.xy) * 2.f - 1.f;
+  const vec2 pixelCenter = (gl_LaunchIDNV.xy + vec2(.5f, .5f)) /
+    gl_LaunchSizeNV.xy;
+  const vec2 ndc = vec2(2.f, -2.f) * pixelCenter + vec2(-1.f, 1.f);
   const vec3 origin = camera.Eye.xyz;
-  const vec3 direction = normalize(d.x * camera.U.xyz + d.y * camera.V.xyz +
+  const vec3 direction = normalize(ndc.x * camera.U.xyz + ndc.y * camera.V.xyz +
     camera.W.xyz);
 
   uint rayFlags = gl_RayFlagsOpaqueNV;
   uint cullMask = 0xF; // 8 bits only
-  float tmin = .001f;
-  float tmax = 10000.f;
+  float tmin = 0.f;
+  float tmax = 1e+38f;
 
-  traceNV(topLevelAS, rayFlags, cullMask, 0 /* sbtRecordOffset */,
+  traceNV(scene, rayFlags, cullMask, 0 /* sbtRecordOffset */,
     0 /* sbtRecordStride */, 0 /* missIndex */, origin, tmin, direction, tmax,
     0 /* payload */);
 
